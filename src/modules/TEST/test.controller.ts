@@ -1,14 +1,14 @@
 import { Context } from "telegraf";
 import { message } from "telegraf/filters";
 import { Update } from "telegraf/typings/core/types/typegram";
-import { CalculatorService } from "./calculator.service";
+import { TestService } from "./test.service";
 
 // Импортируем наш псевдоним типа для клавиатуры, который мы создали ранее
 type ReplyKeyboard = ReturnType<typeof import("telegraf").Markup.keyboard>;
 
-export class CalculatorController {
+export class TestController {
     constructor(
-        private calculatorService: CalculatorService,
+        private calculatorService: TestService,
         private userState: Map<number, string>
     ) { }
 
@@ -16,16 +16,16 @@ export class CalculatorController {
      * Срабатывает, когда пользователь нажимает кнопку "Калькулятор".
      * Устанавливает состояние и просит ввести числа.
      */
-    public onMultiplyRequest(ctx: Context, mainMenuKeyboard: ReplyKeyboard) {
+    public onTestSum(ctx: Context, mainMenuKeyboard: ReplyKeyboard) {
         const userId = ctx.from!.id;
-        this.userState.set(userId, 'awaiting_multiplication_numbers');
+        this.userState.set(userId, 'awaiting_sum_numbers');
         ctx.reply('Введите два числа через пробел (например, 7 8):', mainMenuKeyboard);
     }
 
     /**
      * Срабатывает, когда пользователь присылает числа для умножения.
      */
-    public async onNumbersReceived(ctx: Context<Update.MessageUpdate>, mainMenuKeyboard: ReplyKeyboard) {
+    public async onNumbersReceivedSum(ctx: Context<Update.MessageUpdate>, mainMenuKeyboard: ReplyKeyboard) {
         if (!ctx.has(message("text"))) return;
 
         const userId = ctx.from.id;
@@ -49,8 +49,8 @@ export class CalculatorController {
         // Сбрасываем состояние, так как операция завершена
         this.userState.delete(userId);
 
-        const result = this.calculatorService.multiply(num1, num2);
+        const result = this.calculatorService.sum(num1, num2);
 
-        ctx.reply(`Результат: ${num1} × ${num2} = ${result}`, mainMenuKeyboard);
+        ctx.reply(`✅Результат: ${num1} + ${num2} = ${result}`, mainMenuKeyboard);
     }
 }
