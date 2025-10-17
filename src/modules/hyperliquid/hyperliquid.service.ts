@@ -116,8 +116,8 @@ export class HyperliquidService {
             assetContexts.map(asset => [asset.name, asset])
         );
 
-        const headers = { coin: 'Монета', size: 'Размер', notional: 'Стоимость', funding: 'Фандинг (8ч)' };
-        const columnWidths = { coin: 13, size: 11, notional: 14, funding: 13 };
+        const headers = { coin: 'Монета', size: 'Размер', notional: 'Стоимость', funding: 'Фандинг ' };
+        const columnWidths = { coin: 20, size: 20, notional: 20, funding: 15 };
 
         let table = `${headers.coin.padEnd(columnWidths.coin)}`;
         table += `${headers.size.padEnd(columnWidths.size)}`;
