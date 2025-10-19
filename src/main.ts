@@ -11,13 +11,19 @@ import { ParadexController } from './modules/paradex/paradex.controller';
 import { ParadexService } from './modules/paradex/paradex.service';
 import { LighterController } from './modules/lighter/lighter.controller';
 import { LighterService } from './modules/lighter/lighter.service';
+import { NotificationService } from './modules/notifications/notification.service';
+import { NotificationController } from './modules/notifications/notification.controller';
+import { ExtendedController } from './modules/extended/extended.controller';
+import { ExtendedService } from './modules/extended/extended.service';
 
 
 import { message } from 'telegraf/filters';
 
+// --- ИЗМЕНЕНО: Добавляем новую строку с кнопками для уведомлений ---
 const mainMenuKeyboard = Markup.keyboard([
-    ['🔎 HL', '✖️ Калькулятор'],
-    ['BIN', 'Paradex', 'Lighter']
+    ['🔎 HL', '✖️ Калькулятор', 'Extended'],
+    ['BIN', 'Paradex', 'Lighter'],
+    ['🔔 Включить Alert', '🔕 Выключить Alert']
 ]).resize();
 
 const userState = new Map<number, string>();
@@ -39,6 +45,13 @@ async function start() {
     const lighterService = new LighterService();
     const lighterController = new LighterController(lighterService, userState);
 
+    const notificationService = new NotificationService(bot);
+    const notificationController = new NotificationController(notificationService);
+
+    const extendedService = new ExtendedService();
+    const extendedController = new ExtendedController(extendedService, userState);
+
+
     // --- Регистрация команды /start ---
     bot.start((ctx) => {
         // При старте на всякий случай сбрасываем состояние
@@ -55,33 +68,42 @@ async function start() {
         const text = ctx.message.text;
         const currentState = userState.get(userId);
 
-        // --- ИЗМЕНЕНИЕ ЛОГИКИ ---
-        // Сначала проверяем, не является ли сообщение командой из главного меню.
-        // Это позволяет "перебить" любое предыдущее состояние.
-        if (text === '🔎 HL' || text === '✖️ Калькулятор' || text === 'BIN' || text === 'Paradex' || text === 'Lighter') {
+        // --- ИЗМЕНЕНО: Добавляем названия новых кнопок в проверку ---
+        const mainMenuCommands = ['🔎 HL', '✖️ Калькулятор', 'BIN', 'Paradex', 'Lighter', '🔔 Включить Alert', '🔕 Выключить Alert', 'Extended'];
+
+        if (mainMenuCommands.includes(text)) {
             userState.delete(userId); // Сбрасываем предыдущее состояние!
 
             switch (text) {
                 case '🔎 HL':
                     hyperliquidController.onCheckAccountRequest(ctx, mainMenuKeyboard);
-                    return; // Выходим
+                    return;
 
                 case '✖️ Калькулятор':
-                    // ИСПРАВЛЕНИЕ: Теперь мы передаем клавиатуру
                     calculatorController.onMultiplyRequest(ctx, mainMenuKeyboard);
-                    return; // Выходим
+                    return;
 
                 case 'BIN':
-                    // Передаем клавиатуру в метод контроллера
                     binanceController.onEquityRequest(ctx, mainMenuKeyboard);
                     return;
                 case 'Paradex':
-                    // Передаем клавиатуру в метод контроллера
                     paradexController.onAccountRequest(ctx, mainMenuKeyboard);
                     return;
 
                 case 'Lighter':
                     lighterController.onAccountRequestPara(ctx, mainMenuKeyboard);
+                    return;
+
+                case 'Extended':
+                    extendedController.onPositionsRequest(ctx, mainMenuKeyboard);
+                    return;
+
+                case '🔔 Включить Alert':
+                    notificationController.startMonitoring(ctx);
+                    return;
+
+                case '🔕 Выключить Alert':
+                    notificationController.stopMonitoring(ctx);
                     return;
             }
         }
@@ -103,7 +125,7 @@ async function start() {
 
     // --- Запуск бота ---
     await bot.launch();
-    console.log('Бот успешно запущен с исправленной логикой!');
+    console.log('Бот успешно запущен с модулем уведомлений!');
 }
 
 start();
