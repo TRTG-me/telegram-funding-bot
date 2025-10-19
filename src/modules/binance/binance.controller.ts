@@ -43,24 +43,29 @@ export class BinanceController {
             await ctx.reply('⏳ Запрашиваю данные вашего Portfolio Margin аккаунта...');
 
             const accountInfo = await this.binanceService.getAccountInfo();
-            const posInfo = await this.binanceService.getPositionInfo()
-            console.log('Получен ответ от API Binance:', accountInfo);
-            console.log('Pos Bin', posInfo)
-            // --- ИСПОЛЬЗУЕМ НАШУ ЕДИНУЮ ПРОВЕРКУ ---
-            if (isAccountInfoValid(accountInfo)) {
-                // ВНУТРИ ЭТОГО БЛОКА TYPESCRIPT УМНЫЙ!
-                // Он знает, что accountInfo имеет тип ValidAccountInfo,
-                // а значит, все поля существуют и являются строками.
+            // const posInfo = await this.binanceService.getPositionInfo()
+            const leverage = await this.binanceService.calculateAccountLeverage()
+            // console.log('Получен ответ от API Binance:', accountInfo);
+            // console.log('Pos Bin', posInfo)
+            // // --- ИСПОЛЬЗУЕМ НАШУ ЕДИНУЮ ПРОВЕРКУ ---
+            // if (isAccountInfoValid(accountInfo)) {
+            if (isFinite(leverage) && isAccountInfoValid(accountInfo)) {
+                //     // ВНУТРИ ЭТОГО БЛОКА TYPESCRIPT УМНЫЙ!
+                //     // Он знает, что accountInfo имеет тип ValidAccountInfo,
+                //     // а значит, все поля существуют и являются строками.
+                console.log(accountInfo)
+                //     // Никаких ошибок 'undefined' здесь больше не будет!
+                //     const equity = parseFloat(accountInfo.accountEquity).toFixed(2);
+                //     const status = accountInfo.accountStatus; // Тоже безопасно
 
-                // Никаких ошибок 'undefined' здесь больше не будет!
-                const equity = parseFloat(accountInfo.accountEquity).toFixed(2);
-                const status = accountInfo.accountStatus; // Тоже безопасно
+                //     const escapedEquity = escapeMarkdownV2(equity);
+                //     const escapedStatus = escapeMarkdownV2(status);
+                const formattedLeverage = leverage.toFixed(3);
 
-                const escapedEquity = escapeMarkdownV2(equity);
-                const escapedStatus = escapeMarkdownV2(status);
+                const escapedLeverage = escapeMarkdownV2(formattedLeverage);
+                console.log('Плечо Бин =', escapedLeverage)
 
-                const message = `💰 *Эквити:* \`${escapedEquity}\` *USD*\n` +
-                    `📉 *Статус:* \`${escapedStatus}\``;
+                const message = `🚀 *Плечо:* \`${escapedLeverage}\``;
 
                 await ctx.reply(message, {
                     parse_mode: 'MarkdownV2',
