@@ -76,7 +76,7 @@ async function start() {
 
             switch (text) {
                 case '🔎 HL':
-                    hyperliquidController.onCheckAccountRequest(ctx, mainMenuKeyboard);
+                    hyperliquidController.onWalletAddressReceived(ctx, mainMenuKeyboard);
                     return;
 
                 case '✖️ Калькулятор':
@@ -109,10 +109,10 @@ async function start() {
         }
 
         // Если это не команда из меню, тогда проверяем состояние
-        if (currentState === 'awaiting_wallet_address') {
-            hyperliquidController.onWalletAddressReceived(ctx, mainMenuKeyboard);
-            return;
-        }
+        // if (currentState === 'awaiting_wallet_address') {
+        //     hyperliquidController.onWalletAddressReceived(ctx, mainMenuKeyboard);
+        //     return;
+        // }
         if (currentState === 'awaiting_multiplication_numbers') {
             calculatorController.onNumbersReceived(ctx, mainMenuKeyboard);
             return;
