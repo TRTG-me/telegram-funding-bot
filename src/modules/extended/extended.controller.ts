@@ -1,3 +1,5 @@
+// src/modules/extended/extended.controller.ts
+
 import { Context } from 'telegraf';
 import { ExtendedService } from './extended.service';
 
@@ -6,28 +8,34 @@ type ReplyKeyboard = ReturnType<typeof import("telegraf").Markup.keyboard>;
 export class ExtendedController {
     constructor(
         private readonly extendedService: ExtendedService,
+        // Добавляем userState для единообразия с другими контроллерами
         private readonly userState: Map<number, string>
     ) { }
 
-    public async onPositionsRequest(ctx: Context, mainMenuKeyboard: ReplyKeyboard) {
+    public async onAccountRequest(ctx: Context, mainMenuKeyboard: ReplyKeyboard) {
         try {
-            await ctx.reply('⏳ Запрашиваю данные с Extended Exchange...');
+            await ctx.reply('⏳ Выполняю запрос к Extended Exchange...');
 
-            // Вызываем сервис для получения данных
-            const positionsData = await this.extendedService.getOpenPositions();
+            // 1. Вызываем единый метод сервиса, который делает всю работу
+            const leverage = await this.extendedService.calculateLeverage();
 
-            // Выводим полученные данные в лог сервера, как вы и просили
-            console.log('✅ Успешно получены данные с Extended Exchange:', positionsData);
+            // 2. Форматируем полученное число для красивого вывода
+            const formattedLeverage = leverage.toFixed(2);
 
-            // Отправляем пользователю сообщение об успехе
-            await ctx.reply('✅ Запрос успешно выполнен!', mainMenuKeyboard);
+            // 3. Собираем и отправляем сообщение пользователю
+            const message = `✅ Ваше текущее плечо на Extended Exchange: <b>${formattedLeverage}x</b>`;
+            await ctx.replyWithHTML(message, mainMenuKeyboard);
 
         } catch (error) {
-            // В случае ошибки в сервисе, логируем ее и сообщаем пользователю
+            // 4. В случае любой ошибки из сервиса, сообщаем об этом
             console.error('❌ Произошла ошибка в процессе запроса к Extended Exchange:', error);
+
+            // Извлекаем сообщение из объекта Error
+            const errorMessage = error instanceof Error ? error.message : 'Неизвестная ошибка.';
+
             await ctx.reply(
-                '❌ Произошла ошибка при выполнении запроса. Подробности в логе сервера.',
-                mainMenuKeyboard
+                `❌ Произошла ошибка при выполнении запроса.\n\n<i>Детали: ${errorMessage}</i>`,
+                { ...mainMenuKeyboard, parse_mode: 'HTML' }
             );
         }
     }

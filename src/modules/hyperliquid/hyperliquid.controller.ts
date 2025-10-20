@@ -50,7 +50,7 @@ export class HyperliquidController {
             let message = `<b>📊 Ваш аккаунт Hyperliquid</b>\n\n`;
             message += `💰 <b>Общая стоимость:</b> <code>$${summary.accountValue.toFixed(2)}</code>\n`;
             message += `💼 <b>Margin Used:</b> <code>$${summary.marginUsed.toFixed(2)}</code>\n`;
-            message += `杠 <b>Плечо (общее):</b> <code>${summary.leverages.byTotalNtlPos.toFixed(5)}x</code>\n\n`;
+            message += `杠 <b>Плечо (общее):</b> <code>${summary.leverage.toFixed(5)}x</code>\n\n`;
             message += `<b>Открытые позиции</b>\n`;
 
             if (summary.openPositions.length === 0) {

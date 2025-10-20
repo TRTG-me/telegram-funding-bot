@@ -1,4 +1,8 @@
+// src/modules/hyperliquid/hyperliquid.service.ts
+
 import axios from 'axios';
+
+// --- ИНТЕРФЕЙСЫ ---
 
 // Тип для метаданных по одному активу (из первого массива 'universe')
 interface AssetNameInfo {
@@ -35,7 +39,6 @@ interface HyperliquidAccountInfo {
     crossMaintenanceMarginUsed?: string;
 }
 
-
 // Детали одной открытой позиции для отображения
 export interface PositionDetail {
     coin: string;
@@ -45,20 +48,17 @@ export interface PositionDetail {
     fundingRate: number; // Уже в процентах
 }
 
-// Полный объект с данными для контроллера (наш главный "продукт")
+// ИЗМЕНЕНИЕ: Полный объект с данными для контроллера теперь проще
 export interface FullAccountSummary {
     accountValue: number;
     marginUsed: number;
-    leverages: {
-        byPositionValue: number;
-        byTotalNtlPos: number;
-    };
+    leverage: number; // <-- Теперь это одно число, а не объект
     openPositions: PositionDetail[];
 }
 
+
 export class HyperliquidService {
     private readonly API_URL = 'https://api.hyperliquid.xyz/info';
-
 
     private getErrorMessage(error: unknown): string {
         if (error instanceof Error) {
@@ -85,37 +85,30 @@ export class HyperliquidService {
             const response = await axios.post<MetaAndAssetCtxsResponse>(this.API_URL, {
                 type: 'metaAndAssetCtxs',
             });
-
             const [meta, contexts] = response.data;
-            const universe = meta.universe;
-
-            if (universe.length !== contexts.length) {
+            if (meta.universe.length !== contexts.length) {
                 console.error("Universe and contexts arrays have different lengths!");
                 return null;
             }
-
-            return universe.map((asset, i) => ({
+            return meta.universe.map((asset, i) => ({
                 name: asset.name,
                 funding: contexts[i].funding,
             }));
-
         } catch (error) {
             const message = this.getErrorMessage(error);
             throw new Error(`Failed to fetch Hyperliquid asset contexts: ${message}`);
         }
     }
 
-    // --- ЕДИНЫЙ ПУБЛИЧНЫЙ МЕТОД ---
+    // --- ЕДИНЫЙ ПУБЛИЧНЫЙ МЕТОД (УПРОЩЕННАЯ ВЕРСИЯ) ---
 
     public async getAccountSummary(userAddress: string): Promise<FullAccountSummary> {
         try {
-            // 1. Получаем все "сырые" данные параллельно
             const [accountState, assetContexts] = await Promise.all([
                 this.getAccountState(userAddress),
                 this.getAssetContexts()
             ]);
 
-            // 2. "Фейсконтроль" для всех полученных данных
             if (
                 !accountState.marginSummary ||
                 typeof accountState.marginSummary.accountValue !== 'string' ||
@@ -127,7 +120,7 @@ export class HyperliquidService {
                 throw new Error('Incomplete or invalid data received from Hyperliquid API.');
             }
 
-            // 3. Выполняем все вычисления
+            // Выполняем все вычисления
             const accountValue = parseFloat(accountState.marginSummary.accountValue);
             const marginUsed = parseFloat(accountState.crossMaintenanceMarginUsed);
             const totalNtlPos = parseFloat(accountState.marginSummary.totalNtlPos);
@@ -137,22 +130,20 @@ export class HyperliquidService {
             }
 
             const denominator = accountValue - marginUsed;
-            let leverages = { byPositionValue: 0, byTotalNtlPos: 0 };
+            // ИЗМЕНЕНИЕ: Объявляем одну переменную для плеча
+            let leverage = 0;
 
             if (denominator !== 0) {
-                const totalPositionValue = accountState.assetPositions.reduce((sum, p) => {
-                    return sum + Math.abs(parseFloat(p.position.positionValue || '0'));
-                }, 0);
+                // ИЗМЕНЕНИЕ: УБРАН расчет totalPositionValue. Он больше не нужен.
+                leverage = totalNtlPos / denominator;
 
-                leverages.byPositionValue = totalPositionValue / denominator;
-                leverages.byTotalNtlPos = totalNtlPos / denominator;
-
-                if (!isFinite(leverages.byPositionValue) || !isFinite(leverages.byTotalNtlPos)) {
+                // ИЗМЕНЕНИЕ: Проверяем только одно значение
+                if (!isFinite(leverage)) {
                     throw new Error('Leverage calculation resulted in a non-finite number.');
                 }
             }
 
-            // 4. Обрабатываем и фильтруем позиции
+            // Обрабатываем и фильтруем позиции
             const universeMap = new Map<string, CombinedAssetCtx>(
                 assetContexts.map(asset => [asset.name, asset])
             );
@@ -173,19 +164,17 @@ export class HyperliquidService {
                     };
                 });
 
-            // 5. Собираем и возвращаем финальный, чистый объект с данными
+            // ИЗМЕНЕНИЕ: Собираем и возвращаем финальный, чистый объект с одним плечом
             return {
                 accountValue,
                 marginUsed,
-                leverages,
+                leverage, // <-- Передаем одно число
                 openPositions,
             };
 
         } catch (err) {
             const message = this.getErrorMessage(err);
-            // Логируем для себя полную ошибку
             console.error('Error during Hyperliquid account summary generation:', err);
-            // Наружу отдаем более общее сообщение
             throw new Error(`Failed to get Hyperliquid account summary: ${message}`);
         }
     }
