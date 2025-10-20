@@ -91,11 +91,11 @@ async function start() {
                     return;
 
                 case 'Lighter':
-                    lighterController.onAccountRequestPara(ctx, mainMenuKeyboard);
+                    lighterController.onAccountRequestL(ctx, mainMenuKeyboard);
                     return;
 
                 case 'Extended':
-                    extendedController.onPositionsRequest(ctx, mainMenuKeyboard);
+                    extendedController.onAccountRequest(ctx, mainMenuKeyboard);
                     return;
 
                 case '🔔 Включить Alert':
