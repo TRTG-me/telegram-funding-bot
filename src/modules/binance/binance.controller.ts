@@ -44,12 +44,12 @@ export class BinanceController {
 
             const accountInfo = await this.binanceService.getAccountInfo();
             // const posInfo = await this.binanceService.getPositionInfo()
-            const leverage = await this.binanceService.calculateAccountLeverage()
+            const info = await this.binanceService.calculateAccountLeverage()
             // console.log('Получен ответ от API Binance:', accountInfo);
             // console.log('Pos Bin', posInfo)
             // // --- ИСПОЛЬЗУЕМ НАШУ ЕДИНУЮ ПРОВЕРКУ ---
             // if (isAccountInfoValid(accountInfo)) {
-            if (isFinite(leverage) && isAccountInfoValid(accountInfo)) {
+            if (isFinite(info.leverage) && isAccountInfoValid(accountInfo)) {
                 //     // ВНУТРИ ЭТОГО БЛОКА TYPESCRIPT УМНЫЙ!
                 //     // Он знает, что accountInfo имеет тип ValidAccountInfo,
                 //     // а значит, все поля существуют и являются строками.
@@ -60,13 +60,14 @@ export class BinanceController {
 
                 //     const escapedEquity = escapeMarkdownV2(equity);
                 //     const escapedStatus = escapeMarkdownV2(status);
-                const formattedLeverage = leverage.toFixed(3);
-
+                const formattedLeverage = info.leverage.toFixed(3);
+                const formattedEquity = info.accountEquity.toFixed(1);
+                const escapedEquity = escapeMarkdownV2(formattedEquity);
                 const escapedLeverage = escapeMarkdownV2(formattedLeverage);
-                console.log('Плечо Бин =', escapedLeverage)
 
-                const message = `🚀 *Плечо:* \`${escapedLeverage}\``;
 
+                let message = `🚀 *Плечо:* ${escapedLeverage}\n`;
+                message += `💰 *Account Equity:* ${escapedEquity}`;
                 await ctx.reply(message, {
                     parse_mode: 'MarkdownV2',
                     ...mainMenuKeyboard

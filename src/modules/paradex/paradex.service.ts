@@ -3,6 +3,7 @@
 import axios from 'axios';
 import { ec, typedData as starkTypedData, TypedData, shortString } from 'starknet';
 import { getUnixTime } from 'date-fns';
+import { IExchangeData } from '../../common/interfaces'
 
 // =================================================================
 // ИНТЕРФЕЙСЫ: "КОНТРАКТЫ" ДЛЯ ДАННЫХ API
@@ -132,7 +133,7 @@ export class ParadexService {
 
     // --- ЕДИНЫЙ ПУБЛИЧНЫЙ МЕТОД ДЛЯ РАСЧЕТА ПЛЕЧА ---
 
-    public async calculateLeverage(): Promise<number> {
+    public async calculateLeverage(): Promise<IExchangeData> {
         try {
             const jwtToken = await this.getJwtToken();
 
@@ -171,7 +172,7 @@ export class ParadexService {
 
             // Если открытых позиций нет, плечо равно 0
             if (totalCostUsd === 0) {
-                return 0;
+                return { leverage: 0, accountEquity: accountValue };
             }
 
             const denominator = accountValue - maintMargin;
@@ -185,7 +186,7 @@ export class ParadexService {
                 throw new Error('Leverage calculation resulted in a non-finite number.');
             }
 
-            return leverage;
+            return { leverage, accountEquity: accountValue };
 
         } catch (err) {
             const message = this.getErrorMessage(err);

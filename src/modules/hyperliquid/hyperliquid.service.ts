@@ -1,6 +1,7 @@
 // src/modules/hyperliquid/hyperliquid.service.ts
 
 import axios from 'axios';
+import { IExchangeData } from '../../common/interfaces'
 
 // --- ИНТЕРФЕЙСЫ ---
 
@@ -50,14 +51,16 @@ export interface PositionDetail {
 
 // ИЗМЕНЕНИЕ: Полный объект с данными для контроллера теперь проще
 export interface FullAccountSummary {
-    accountValue: number;
-    marginUsed: number;
-    leverage: number; // <-- Теперь это одно число, а не объект
-    openPositions: PositionDetail[];
+    leverage: number;
+    accountEquity: number;
+    // marginUsed: number;
+    // // <-- Теперь это одно число, а не объект
+    // openPositions: PositionDetail[];
 }
 
 
 export class HyperliquidService {
+
     private readonly API_URL = 'https://api.hyperliquid.xyz/info';
 
     private getErrorMessage(error: unknown): string {
@@ -66,12 +69,12 @@ export class HyperliquidService {
         }
         return String(error);
     }
-
-    private async getAccountState(userAddress: string): Promise<HyperliquidAccountInfo> {
+    private readonly userAddress = process.env.ACCOUNT_HYPERLIQUID_ETH;
+    private async getAccountState(): Promise<HyperliquidAccountInfo> {
         try {
             const response = await axios.post(this.API_URL, {
                 type: 'clearinghouseState',
-                user: userAddress,
+                user: this.userAddress,
             });
             return response.data || {};
         } catch (error) {
@@ -102,10 +105,10 @@ export class HyperliquidService {
 
     // --- ЕДИНЫЙ ПУБЛИЧНЫЙ МЕТОД (УПРОЩЕННАЯ ВЕРСИЯ) ---
 
-    public async getAccountSummary(userAddress: string): Promise<FullAccountSummary> {
+    public async getAccountSummary(): Promise<IExchangeData> {
         try {
             const [accountState, assetContexts] = await Promise.all([
-                this.getAccountState(userAddress),
+                this.getAccountState(),
                 this.getAssetContexts()
             ]);
 
@@ -166,10 +169,11 @@ export class HyperliquidService {
 
             // ИЗМЕНЕНИЕ: Собираем и возвращаем финальный, чистый объект с одним плечом
             return {
-                accountValue,
-                marginUsed,
-                leverage, // <-- Передаем одно число
-                openPositions,
+                leverage,
+                accountEquity: accountValue,
+                // marginUsed,
+                // leverage, // <-- Передаем одно число
+                // openPositions,
             };
 
         } catch (err) {

@@ -15,6 +15,10 @@ import { NotificationService } from './modules/notifications/notification.servic
 import { NotificationController } from './modules/notifications/notification.controller';
 import { ExtendedController } from './modules/extended/extended.controller';
 import { ExtendedService } from './modules/extended/extended.service';
+import { RankingService } from './modules/ranking/ranking.service';
+import { RankingController } from './modules/ranking/ranking.controller';
+import { SummaryController } from './modules/summary/summary.controller'
+import { SummaryService } from './modules/summary/summary.service';
 
 
 import { message } from 'telegraf/filters';
@@ -23,7 +27,8 @@ import { message } from 'telegraf/filters';
 const mainMenuKeyboard = Markup.keyboard([
     ['🔎 HL', '✖️ Калькулятор', 'Extended'],
     ['BIN', 'Paradex', 'Lighter'],
-    ['🔔 Включить Alert', '🔕 Выключить Alert']
+    ['🔔 Включить Alert', '🔕 Выключить Alert'],
+    ['✏️ Изменить ранги', 'Плечи и Эквити']
 ]).resize();
 
 const userState = new Map<number, string>();
@@ -51,6 +56,17 @@ async function start() {
     const extendedService = new ExtendedService();
     const extendedController = new ExtendedController(extendedService, userState);
 
+    const rankingService = new RankingService();
+    const rankingController = new RankingController(rankingService, userState);
+
+    const summaryService = new SummaryService(
+        binanceService,
+        hyperliquidService,
+        paradexService,
+        lighterService,
+        extendedService
+    );
+    const summaryController = new SummaryController(summaryService);
 
     // --- Регистрация команды /start ---
     bot.start((ctx) => {
@@ -69,7 +85,7 @@ async function start() {
         const currentState = userState.get(userId);
 
         // --- ИЗМЕНЕНО: Добавляем названия новых кнопок в проверку ---
-        const mainMenuCommands = ['🔎 HL', '✖️ Калькулятор', 'BIN', 'Paradex', 'Lighter', '🔔 Включить Alert', '🔕 Выключить Alert', 'Extended'];
+        const mainMenuCommands = ['🔎 HL', '✖️ Калькулятор', 'BIN', 'Paradex', 'Lighter', '🔔 Включить Alert', '🔕 Выключить Alert', 'Extended', '✏️ Изменить ранги', 'Плечи и Эквити'];
 
         if (mainMenuCommands.includes(text)) {
             userState.delete(userId); // Сбрасываем предыдущее состояние!
@@ -105,6 +121,13 @@ async function start() {
                 case '🔕 Выключить Alert':
                     notificationController.stopMonitoring(ctx);
                     return;
+
+                case '✏️ Изменить ранги':
+                    return rankingController.onUpdateRanksRequest(ctx);
+
+                case 'Плечи и Эквити':
+                    return summaryController.sendSummaryTable(ctx);
+
             }
         }
 
@@ -117,7 +140,9 @@ async function start() {
             calculatorController.onNumbersReceived(ctx, mainMenuKeyboard);
             return;
         }
-
+        if (currentState === 'awaiting_ranks_json') { // Новое состояние
+            return rankingController.onRanksJsonReceived(ctx);
+        }
 
         // Если мы дошли до сюда, значит, это неизвестная команда
         ctx.reply('Неизвестная команда. Пожалуйста, используйте кнопки внизу.', mainMenuKeyboard);
