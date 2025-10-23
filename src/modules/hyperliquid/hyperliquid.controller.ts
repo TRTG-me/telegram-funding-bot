@@ -43,34 +43,34 @@ export class HyperliquidController {
         await ctx.reply('⏳ Получаю информацию, это может занять несколько секунд...');
 
         try {
-            // 1. Вызываем сервис и получаем чистый ОБЪЕКТ С ДАННЫМИ
-            const summary: FullAccountSummary = await this.hyperliquidService.getAccountSummary(userAddress);
+            // // 1. Вызываем сервис и получаем чистый ОБЪЕКТ С ДАННЫМИ
+            // const summary: FullAccountSummary = await this.hyperliquidService.getAccountSummary(userAddress);
 
-            // 2. Строим сообщение на основе полученных данных
-            let message = `<b>📊 Ваш аккаунт Hyperliquid</b>\n\n`;
-            message += `💰 <b>Общая стоимость:</b> <code>$${summary.accountValue.toFixed(2)}</code>\n`;
-            message += `💼 <b>Margin Used:</b> <code>$${summary.marginUsed.toFixed(2)}</code>\n`;
-            message += `杠 <b>Плечо (общее):</b> <code>${summary.leverage.toFixed(5)}x</code>\n\n`;
-            message += `<b>Открытые позиции</b>\n`;
+            // // 2. Строим сообщение на основе полученных данных
+            // let message = `<b>📊 Ваш аккаунт Hyperliquid</b>\n\n`;
+            // message += `💰 <b>Общая стоимость:</b> <code>$${summary.accountValue.toFixed(2)}</code>\n`;
+            // message += `💼 <b>Margin Used:</b> <code>$${summary.marginUsed.toFixed(2)}</code>\n`;
+            // message += `杠 <b>Плечо (общее):</b> <code>${summary.leverage.toFixed(5)}x</code>\n\n`;
+            // message += `<b>Открытые позиции</b>\n`;
 
-            if (summary.openPositions.length === 0) {
-                message += "<i>Открытых позиций нет.</i>";
-            } else {
-                let table = '';
-                // Создаем красивую моноширинную таблицу
-                for (const pos of summary.openPositions) {
-                    const sideEmoji = pos.side === 'Long' ? '🟢' : '🔴';
-                    const coinText = `${sideEmoji} ${pos.coin}`;
-                    const notionalText = `$${pos.notionalValue.toFixed(2)}`;
-                    const fundingText = `${pos.fundingRate.toFixed(4)}%`;
+            // if (summary.openPositions.length === 0) {
+            //     message += "<i>Открытых позиций нет.</i>";
+            // } else {
+            //     let table = '';
+            //     // Создаем красивую моноширинную таблицу
+            //     for (const pos of summary.openPositions) {
+            //         const sideEmoji = pos.side === 'Long' ? '🟢' : '🔴';
+            //         const coinText = `${sideEmoji} ${pos.coin}`;
+            //         const notionalText = `$${pos.notionalValue.toFixed(2)}`;
+            //         const fundingText = `${pos.fundingRate.toFixed(4)}%`;
 
-                    table += `${coinText.padEnd(12)} ${notionalText.padEnd(15)} ${fundingText}\n`;
-                }
-                message += `<pre>${table}</pre>`;
-            }
+            //         table += `${coinText.padEnd(12)} ${notionalText.padEnd(15)} ${fundingText}\n`;
+            //     }
+            //     message += `<pre>${table}</pre>`;
+            // }
 
-            // 3. Отправляем готовое HTML-сообщение
-            await ctx.replyWithHTML(message, mainMenuKeyboard);
+            // // 3. Отправляем готовое HTML-сообщение
+            // await ctx.replyWithHTML(message, mainMenuKeyboard);
 
         } catch (error) {
             // 4. Ловим любую ошибку из сервиса и сообщаем пользователю в вежливой форме

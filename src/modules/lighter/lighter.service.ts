@@ -1,6 +1,7 @@
 // src/modules/lighter/lighter.service.ts
 
 import axios from 'axios';
+import { IExchangeData } from '../../common/interfaces'
 
 // =================================================================
 // ИНТЕРФЕЙСЫ: "КОНТРАКТЫ" ДЛЯ ДАННЫХ API
@@ -10,7 +11,8 @@ import axios from 'axios';
 interface LighterPosition {
     symbol?: string;
     position?: string;        // Размер позиции, "0.00" если закрыта
-    position_value?: string;  // Стоимость позиции, может быть отрицательной
+    position_value?: string;
+
 }
 
 // Описывает один аккаунт из массива 'accounts'
@@ -69,7 +71,7 @@ export class LighterService {
     /**
      * Выполняет всю логику: получает данные, вычисляет плечо и возвращает число.
      */
-    public async calculateLeverage(): Promise<number> {
+    public async calculateLeverage(): Promise<IExchangeData> {
         try {
             const response = await this.getAccountData();
 
@@ -101,7 +103,7 @@ export class LighterService {
 
             // Если открытых позиций нет, плечо равно 0
             if (totalPositionValue === 0) {
-                return 0;
+                return { leverage: 0, accountEquity: totalAssetValue };
             }
 
             // 4. Рассчитываем знаменатель по вашей формуле
@@ -119,7 +121,7 @@ export class LighterService {
                 throw new Error('Leverage calculation resulted in a non-finite number.');
             }
 
-            return leverage;
+            return { leverage, accountEquity: totalAssetValue };
 
         } catch (err) {
             const message = this.getErrorMessage(err);

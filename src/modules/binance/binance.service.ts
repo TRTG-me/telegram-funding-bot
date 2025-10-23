@@ -3,7 +3,7 @@ import {
     DerivativesTradingPortfolioMargin,
     DERIVATIVES_TRADING_PORTFOLIO_MARGIN_REST_API_PROD_URL,
 } from '@binance/derivatives-trading-portfolio-margin';
-
+import { IExchangeData } from '../../common/interfaces'
 /**
  * Интерфейс для данных аккаунта, основанный на ответе API.
  * Свойства необязательны (?), так как API может их не вернуть.
@@ -39,6 +39,7 @@ interface PositionInfo {
     maxNotionalValue?: string;
     breakEvenPrice?: string;
 }
+
 
 export class BinanceService {
     private client: DerivativesTradingPortfolioMargin;
@@ -100,7 +101,7 @@ export class BinanceService {
     }
 
 
-    public async calculateAccountLeverage(): Promise<number> {
+    public async calculateAccountLeverage(): Promise<IExchangeData> {
         try {
             const [accountInfo, positionInfo] = await Promise.all([
                 this.getAccountInfo(),
@@ -127,7 +128,7 @@ export class BinanceService {
                 if (totalNotional !== 0) {
                     throw new Error('Cannot calculate leverage: Division by zero (accountEquity equals accountMaintMargin).');
                 }
-                return 0;
+                return { leverage: 0, accountEquity: accountEquity };
             }
 
             const leverage = totalNotional / denominator;
@@ -136,7 +137,7 @@ export class BinanceService {
                 throw new Error('Calculated leverage resulted in an infinite number.');
             }
 
-            return leverage;
+            return { leverage, accountEquity };
 
         } catch (err) {
             // Теперь обработка ошибки полностью типобезопасна

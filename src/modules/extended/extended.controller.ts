@@ -17,13 +17,15 @@ export class ExtendedController {
             await ctx.reply('⏳ Выполняю запрос к Extended Exchange...');
 
             // 1. Вызываем единый метод сервиса, который делает всю работу
-            const leverage = await this.extendedService.calculateLeverage();
+            const accInfo = await this.extendedService.calculateLeverage();
 
             // 2. Форматируем полученное число для красивого вывода
-            const formattedLeverage = leverage.toFixed(2);
+            const formattedLeverage = accInfo.leverage.toFixed(2);
+            const formattedEquity = accInfo.accountEquity.toFixed(2);
 
             // 3. Собираем и отправляем сообщение пользователю
-            const message = `✅ Ваше текущее плечо на Extended Exchange: <b>${formattedLeverage}x</b>`;
+            let message = `🚀 Плечо: ${formattedLeverage}\n`;
+            message += `💰 Account Equity: ${formattedEquity}`;
             await ctx.replyWithHTML(message, mainMenuKeyboard);
 
         } catch (error) {

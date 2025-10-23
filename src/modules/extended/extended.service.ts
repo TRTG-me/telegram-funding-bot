@@ -1,6 +1,7 @@
 // src/modules/extended/extended.service.ts
 
 import axios from 'axios';
+import { IExchangeData } from '../../common/interfaces'
 
 // =================================================================
 // ИНТЕРФЕЙСЫ: "КОНТРАКТЫ" ДЛЯ ДАННЫХ API
@@ -65,7 +66,7 @@ export class ExtendedService {
     /**
      * Выполняет всю логику: получает данные, вычисляет плечо и возвращает число.
      */
-    public async calculateLeverage(): Promise<number> {
+    public async calculateLeverage(): Promise<IExchangeData> {
         try {
             const response = await this.getAccountBalance();
 
@@ -79,7 +80,7 @@ export class ExtendedService {
             ) {
                 throw new Error('Incomplete or invalid data received from Extended Exchange API.');
             }
-            console.log(data)
+            //console.log(data)
             // 2. Парсим основные значения
             const exposure = parseFloat(data.exposure);
             const equity = parseFloat(data.equity);
@@ -91,7 +92,7 @@ export class ExtendedService {
 
             // Если нет позиций (exposure == 0), то и плечо 0
             if (exposure === 0) {
-                return 0;
+                return { leverage: 0, accountEquity: equity };
             }
 
             // 3. Рассчитываем знаменатель по вашей формуле
@@ -108,7 +109,7 @@ export class ExtendedService {
                 throw new Error('Leverage calculation resulted in a non-finite number.');
             }
 
-            return leverage;
+            return { leverage: leverage, accountEquity: equity };
 
         } catch (err) {
             const message = this.getErrorMessage(err);

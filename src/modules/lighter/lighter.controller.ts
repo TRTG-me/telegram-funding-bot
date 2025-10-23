@@ -16,13 +16,16 @@ export class LighterController {
             await ctx.reply('⏳ Выполняю запрос к Lighter, это может занять несколько секунд...');
 
             // 1. Вызываем единый метод сервиса, который делает всю работу
-            const leverage = await this.lighterService.calculateLeverage();
+            const accInfo = await this.lighterService.calculateLeverage();
 
             // 2. Форматируем полученное число для красивого вывода
-            const formattedLeverage = leverage.toFixed(3);
+            const formattedLeverage = accInfo.leverage.toFixed(3);
+            const formattedEquity = accInfo.accountEquity.toFixed(3);
 
             // 3. Собираем и отправляем сообщение пользователю
-            const message = `✅ Ваше текущее плечо на Lighter: <b>${formattedLeverage}x</b>`;
+            let message = `🚀 Плечо: ${formattedLeverage}\n`;
+            message += `💰 Account Equity: ${formattedEquity}`;
+
             await ctx.replyWithHTML(message, mainMenuKeyboard);
 
         } catch (error) {
