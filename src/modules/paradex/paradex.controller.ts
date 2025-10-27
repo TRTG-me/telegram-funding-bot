@@ -18,6 +18,8 @@ export class ParadexController {
 
             // 1. Вызываем новый метод сервиса, который делает всю работу
             const accInfo = await this.paradexService.calculateLeverage();
+            const posInfo = await this.paradexService.getDetailedPositions();
+            console.log(posInfo)
 
             // 2. Форматируем полученное число для красивого вывода
             const formattedLeverage = accInfo.leverage.toFixed(3);

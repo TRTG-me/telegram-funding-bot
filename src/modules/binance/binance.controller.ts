@@ -42,6 +42,8 @@ export class BinanceController {
         try {
             await ctx.reply('⏳ Запрашиваю данные вашего Portfolio Margin аккаунта...');
 
+            const a = await this.binanceService.getDetailedPositions()
+            console.log(a)
             const accountInfo = await this.binanceService.getAccountInfo();
             // const posInfo = await this.binanceService.getPositionInfo()
             const info = await this.binanceService.calculateAccountLeverage()

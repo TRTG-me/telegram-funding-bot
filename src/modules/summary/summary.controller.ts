@@ -14,26 +14,20 @@ export class SummaryController {
             // ИЗМЕНЕНИЕ: Вызываем новый метод сервиса.
             const data: FormattedExchangeData[] = await this.summaryService.getFormattedSummaryData();
 
-            const col1Width = 12;
-            const col2Width = 14;
-            const header = 'Биржа'.padEnd(col1Width) + ' | ' + 'Equity'.padStart(col2Width) + ' | ' + 'Leverage\n';
-            const divider = '-'.repeat(col1Width) + '-+-' + '-'.repeat(col2Width) + '-+----------\n';
+            let messageRows = '';
 
-            let tableRows = '';
-
-            // --- ГЛАВНОЕ УПРОЩЕНИЕ ЗДЕСЬ ---
             data.forEach(exchange => {
-                const name = exchange.name.padEnd(col1Width);
-                const equity = Math.round(exchange.accountEquity).toString().padStart(col2Width);
-
-                // ИЗМЕНЕНИЕ: Эмодзи уже есть в объекте! Больше никаких вызовов сервиса.
+                const equity = Math.round(exchange.accountEquity);
                 const leverage = `${exchange.emoji}${exchange.leverage.toFixed(1)}`;
 
-                tableRows += `${name} | ${equity} | ${leverage}\n`;
+                // --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
+                // Просто оборачиваем содержимое тега <code> в тег <b>
+                messageRows += `<b>${exchange.name}</b>\n`;
+                messageRows += `  Equity:   <b>${equity.toString().padStart(7)}$</b>\n`;
+                messageRows += `  Leverage: <b>${leverage.padStart(7)}x</b>\n\n`;
             });
 
-            const finalMessage = '<b>Сводные данные по биржам:</b>\n\n' +
-                '<pre>' + header + divider + tableRows + '</pre>';
+            const finalMessage = '<b>📊 Сводные данные по биржам:</b>\n\n' + messageRows;
 
             await ctx.replyWithHTML(finalMessage);
 
