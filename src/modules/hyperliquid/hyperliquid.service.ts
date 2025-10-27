@@ -1,7 +1,7 @@
 // src/modules/hyperliquid/hyperliquid.service.ts
 
 import axios from 'axios';
-import { IExchangeData } from '../../common/interfaces'
+import { IExchangeData, IDetailedPosition } from '../../common/interfaces'
 
 // --- ИНТЕРФЕЙСЫ ---
 
@@ -80,6 +80,64 @@ export class HyperliquidService {
         } catch (error) {
             const message = this.getErrorMessage(error);
             throw new Error(`Failed to fetch Hyperliquid account state: ${message}`);
+        }
+    }
+
+    public async getDetailedPositions(): Promise<IDetailedPosition[]> {
+        try {
+            // --- Шаг 1: Параллельно запрашиваем состояние аккаунта и данные по фандингу ---
+            const [accountState, assetContexts] = await Promise.all([
+                this.getAccountState(),
+                this.getAssetContexts()
+            ]);
+
+            // --- Шаг 2: Проверяем, что необходимые данные получены ---
+            if (!Array.isArray(accountState.assetPositions) || !assetContexts) {
+                throw new Error('Incomplete or invalid data received from Hyperliquid API.');
+            }
+
+            // --- Шаг 3: Создаем карту для быстрого доступа к ставкам фандинга по названию монеты ---
+            const fundingMap = new Map<string, string>(
+                assetContexts.map(asset => [asset.name, asset.funding])
+            );
+
+            // --- Шаг 4: Фильтруем и преобразуем позиции в нужный формат ---
+            const detailedPositions: IDetailedPosition[] = accountState.assetPositions
+                // Оставляем только те позиции, у которых есть размер (szi) и он не равен нулю
+                .filter(p => p.position && p.position.szi && parseFloat(p.position.szi) !== 0)
+                // Преобразуем каждую отфильтрованную позицию в формат IDetailedPosition
+                .map(p => {
+                    const position = p.position;
+                    // Мы уверены, что поля существуют после .filter()
+                    const coin = position.coin!;
+                    const szi = parseFloat(position.szi!);
+                    const notional = position.positionValue!;
+
+                    // Получаем часовую ставку фандинга из карты
+                    const hourlyFundingRate = parseFloat(fundingMap.get(coin) || '0');
+
+                    // Расчет фандинга:
+                    // 1. API Hyperliquid отдает часовую ставку (например, 0.0001)
+                    // 2. Умножаем на 8, чтобы привести к 8-часовому периоду
+                    // 3. Умножаем на 100, чтобы получить проценты
+                    const fundingRate = hourlyFundingRate * 8 * 100;
+
+                    return {
+                        coin: coin,
+                        notional: notional,
+                        size: Math.abs(szi), // 3. Размер позы по модулю
+                        side: szi > 0 ? 'L' : 'S', // 4. 'L' для лонга, 'S' для шорта
+                        exchange: 'H', // 5. 'H' для Hyperliquid
+                        fundingRate: fundingRate, // 6. Рассчитанная ставка фандинга
+                    };
+                });
+
+            return detailedPositions;
+
+        } catch (err) {
+            const message = this.getErrorMessage(err);
+            console.error('Error fetching Hyperliquid detailed positions:', err);
+            throw new Error(`Failed to get detailed positions from Hyperliquid: ${message}`);
         }
     }
 

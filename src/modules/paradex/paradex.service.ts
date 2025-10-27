@@ -3,52 +3,33 @@
 import axios from 'axios';
 import { ec, typedData as starkTypedData, TypedData, shortString } from 'starknet';
 import { getUnixTime } from 'date-fns';
-import { IExchangeData } from '../../common/interfaces'
+import { IExchangeData, IDetailedPosition, IParadexAccountResponse, IParadexPosition, IAuthRequest, IParadexPositionsResponse } from '../../common/interfaces';
 
 // =================================================================
-// ИНТЕРФЕЙСЫ: "КОНТРАКТЫ" ДЛЯ ДАННЫХ API
+// ИНТЕРФЕЙСЫ
 // =================================================================
 
-// Тип для ответа от /v1/account
-interface ParadexAccountResponse {
-    account_value?: string;
-    maintenance_margin_requirement?: string;
-}
-
-// Тип для одной позиции из ответа /v1/positions
-interface ParadexPosition {
-    status?: 'OPEN' | 'CLOSED';
-    cost_usd?: string;
-    unrealized_pnl?: string
-    unrealized_funding_pnl?: string
-}
-
-// Тип для полного ответа от /v1/positions, который содержит массив позиций
-interface ParadexPositionsResponse {
-    results: ParadexPosition[];
-}
-
-
-// --- Остальные типы для аутентификации ---
 type UnixTime = number;
-interface AuthRequest extends Record<string, unknown> {
-    method: string;
-    path: string;
-    body: string;
-    timestamp: UnixTime;
-    expiration: UnixTime;
-}
+
+// =================================================================
+// КОНСТАНТЫ
+// =================================================================
+
 const PARADEX_API_URL = 'https://api.prod.paradex.trade/v1';
 const STARKNET_CHAIN_ID = shortString.encodeShortString("PRIVATE_SN_PARACLEAR_MAINNET");
 
 // =================================================================
-// СЕРВИС: МОЗГ ПРИЛОЖЕНИЯ
+// СЕРВИС
 // =================================================================
 
 export class ParadexService {
     private readonly SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
     private readonly accountAddress: string;
     private readonly privateKey: string;
+
+    // --- СВОЙСТВА ДЛЯ КЭШИРОВАНИЯ JWT ТОКЕНА ---
+    private jwtToken: string | null = null;
+    private tokenExpiration: number = 0;
 
     constructor() {
         const address = process.env.ACCOUNT_ADDRESS;
@@ -61,7 +42,7 @@ export class ParadexService {
         this.privateKey = key;
     }
 
-    // --- ПРИВАТНЫЕ МЕТОДЫ АУТЕНТИФИКАЦИИ (без изменений) ---
+    // --- ПРИВАТНЫЕ МЕТОДЫ АУТЕНТИФИКАЦИИ ---
 
     private getErrorMessage(error: unknown): string {
         if (axios.isAxiosError(error)) {
@@ -83,7 +64,7 @@ export class ParadexService {
         return { name: "Paradex", chainId: STARKNET_CHAIN_ID, version: "1" };
     }
 
-    private buildAuthTypedData(request: AuthRequest): TypedData {
+    private buildAuthTypedData(request: IAuthRequest): TypedData {
         return {
             domain: this.buildParadexDomain(),
             primaryType: "Request",
@@ -100,59 +81,128 @@ export class ParadexService {
 
     private signAuthRequest(): { signature: string; timestamp: UnixTime; expiration: UnixTime; } {
         const { timestamp, expiration } = this.generateTimestamps();
-        const request: AuthRequest = { method: "POST", path: "/v1/auth", body: "", timestamp, expiration };
+        const request: IAuthRequest = { method: "POST", path: "/v1/auth", body: "", timestamp, expiration };
         const typedData = this.buildAuthTypedData(request);
         const signature = this.signatureFromTypedData(typedData);
         return { signature, timestamp, expiration };
     }
 
+    // --- ОПТИМИЗИРОВАННЫЙ МЕТОД ПОЛУЧЕНИЯ JWT ТОКЕНА С КЭШИРОВАНИЕМ ---
     private async getJwtToken(): Promise<string> {
+        if (this.jwtToken && this.tokenExpiration > Date.now()) {
+            return this.jwtToken;
+        }
+
         try {
             const { signature, timestamp, expiration } = this.signAuthRequest();
             const headers = { 'Accept': 'application/json', 'PARADEX-STARKNET-ACCOUNT': this.accountAddress, 'PARADEX-STARKNET-SIGNATURE': signature, 'PARADEX-TIMESTAMP': timestamp.toString(), 'PARADEX-SIGNATURE-EXPIRATION': expiration.toString() };
             const response = await axios.post(`${PARADEX_API_URL}/auth`, {}, { headers });
-            return response.data.jwt_token;
+
+            this.jwtToken = response.data.jwt_token;
+            this.tokenExpiration = Date.now() + this.SEVEN_DAYS_MS - (60 * 60 * 1000); // Кэш на 7 дней минус 1 час
+
+            return this.jwtToken!;
         } catch (error) {
+            this.jwtToken = null;
+            this.tokenExpiration = 0;
             throw new Error(`Failed to get JWT token: ${this.getErrorMessage(error)}`);
         }
     }
 
-    // --- НОВЫЕ ПРИВАТНЫЕ МЕТОДЫ ДЛЯ ПОЛУЧЕНИЯ ДАННЫХ ---
+    // --- ПРИВАТНЫЕ МЕТОДЫ ДЛЯ ПОЛУЧЕНИЯ ДАННЫХ ---
 
-    private async getAccount(jwtToken: string): Promise<ParadexAccountResponse> {
+    private async getAccount(jwtToken: string): Promise<IParadexAccountResponse> {
         const headers = { 'Accept': 'application/json', 'Authorization': `Bearer ${jwtToken}` };
         const response = await axios.get(`${PARADEX_API_URL}/account`, { headers });
         return response.data;
     }
 
-    private async getPositions(jwtToken: string): Promise<ParadexPositionsResponse> {
+    private async getPositions(jwtToken: string): Promise<IParadexPositionsResponse> {
         const headers = { 'Accept': 'application/json', 'Authorization': `Bearer ${jwtToken}` };
         const response = await axios.get(`${PARADEX_API_URL}/positions`, { headers });
         return response.data;
     }
 
-    // --- ЕДИНЫЙ ПУБЛИЧНЫЙ МЕТОД ДЛЯ РАСЧЕТА ПЛЕЧА ---
+    // --- НОВЫЕ ПРИВАТНЫЕ HELPER-МЕТОДЫ ДЛЯ УСТРАНЕНИЯ ДУБЛИРОВАНИЯ ---
+
+    private _calculatePositionNotional(position: IParadexPosition): number {
+        const absCost = Math.abs(parseFloat(position.cost_usd || '0'));
+        const unrealizedPnl = parseFloat(position.unrealized_pnl || '0');
+        const unrealizedFundingPnl = parseFloat(position.unrealized_funding_pnl || '0');
+        return absCost - unrealizedPnl + unrealizedFundingPnl;
+    }
+
+    private async _getOpenPositions(jwtToken: string): Promise<IParadexPosition[]> {
+        const positionsResponse = await this.getPositions(jwtToken);
+        if (!Array.isArray(positionsResponse?.results)) {
+            throw new Error('Invalid positions data received from Paradex API.');
+        }
+        return positionsResponse.results.filter(p => p.status === 'OPEN');
+    }
+
+    // --- РЕФАКТОРЕННЫЕ ПУБЛИЧНЫЕ МЕТОДЫ ---
+
+    public async getDetailedPositions(): Promise<IDetailedPosition[]> {
+        try {
+            const jwtToken = await this.getJwtToken();
+            const openPositions = await this._getOpenPositions(jwtToken);
+            const headers = { 'Accept': 'application/json', 'Authorization': `Bearer ${jwtToken}` };
+
+            const detailedPositionsPromises = openPositions.map(async (position): Promise<IDetailedPosition | null> => {
+                if (!position.market) {
+                    console.warn('Skipping position due to missing market field:', position);
+                    return null;
+                }
+                const symbol = position.market;
+
+                const [marketDetailsResponse, marketSummaryResponse] = await Promise.all([
+                    axios.get(`${PARADEX_API_URL}/markets?market=${symbol}`, { headers }),
+                    axios.get(`${PARADEX_API_URL}/markets/summary?market=${symbol}`, { headers })
+                ]);
+
+                const marketDetails = marketDetailsResponse.data.results[0];
+                const marketSummary = marketSummaryResponse.data.results[0];
+
+                const notional = this._calculatePositionNotional(position);
+
+                let fundingRate = parseFloat(marketSummary.funding_rate || '0');
+                if (marketDetails.funding_period_hours === 4) {
+                    fundingRate *= 2;
+                }
+
+                return {
+                    coin: symbol.replace(/-USD-PERP$/, ''),
+                    notional: notional.toString(),
+                    size: Math.abs(parseFloat(position.size || '0')),
+                    side: position.side === 'LONG' ? 'L' : 'S',
+                    exchange: 'P',
+                    fundingRate: fundingRate * 100,
+                };
+            });
+
+            const results = await Promise.all(detailedPositionsPromises);
+            return results.filter((p): p is IDetailedPosition => p !== null);
+
+        } catch (err) {
+            const message = this.getErrorMessage(err);
+            console.error('Error fetching Paradex detailed positions:', err);
+            throw new Error(`Failed to get detailed positions from Paradex: ${message}`);
+        }
+    }
 
     public async calculateLeverage(): Promise<IExchangeData> {
         try {
             const jwtToken = await this.getJwtToken();
 
-            // 1. Получаем все "сырые" данные параллельно
-            const [accountData, positionsResponse] = await Promise.all([
+            const [accountData, openPositions] = await Promise.all([
                 this.getAccount(jwtToken),
-                this.getPositions(jwtToken),
+                this._getOpenPositions(jwtToken),
             ]);
 
-            // 2. "Фейсконтроль" для данных
-            if (
-                typeof accountData?.account_value !== 'string' ||
-                typeof accountData?.maintenance_margin_requirement !== 'string' ||
-                !Array.isArray(positionsResponse?.results)
-            ) {
-                throw new Error('Incomplete or invalid data received from Paradex API.');
+            if (typeof accountData?.account_value !== 'string' || typeof accountData?.maintenance_margin_requirement !== 'string') {
+                throw new Error('Incomplete account data received from Paradex API.');
             }
 
-            // 3. Выполняем вычисления
             const accountValue = parseFloat(accountData.account_value);
             const maintMargin = parseFloat(accountData.maintenance_margin_requirement);
 
@@ -160,18 +210,9 @@ export class ParadexService {
                 throw new Error('Failed to parse financial data from Paradex API response.');
             }
 
-            // Суммируем стоимость только ОТКРЫТЫХ позиций
-            const totalCostUsd = positionsResponse.results
-                .filter(p => p.status === 'OPEN')
-                .reduce((sum, p) => {
-                    const absCost = Math.abs(parseFloat(p.cost_usd || '0'));
-                    const unrealizedPnl = parseFloat(p.unrealized_pnl || '0');
-                    const unrealized_funding_pnl = parseFloat(p.unrealized_funding_pnl || '0')
-                    return sum + (absCost - unrealizedPnl - unrealized_funding_pnl);
-                }, 0);
+            const totalNotional = openPositions.reduce((sum, p) => sum + this._calculatePositionNotional(p), 0);
 
-            // Если открытых позиций нет, плечо равно 0
-            if (totalCostUsd === 0) {
+            if (totalNotional === 0) {
                 return { leverage: 0, accountEquity: accountValue };
             }
 
@@ -180,8 +221,7 @@ export class ParadexService {
                 throw new Error('Cannot calculate leverage: Division by zero.');
             }
 
-            const leverage = totalCostUsd / denominator;
-
+            const leverage = totalNotional / denominator;
             if (!isFinite(leverage)) {
                 throw new Error('Leverage calculation resulted in a non-finite number.');
             }

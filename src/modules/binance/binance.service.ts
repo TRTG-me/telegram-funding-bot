@@ -1,9 +1,12 @@
-// src/modules/binance/binance.service.ts
+import axios from 'axios';
+
 import {
     DerivativesTradingPortfolioMargin,
     DERIVATIVES_TRADING_PORTFOLIO_MARGIN_REST_API_PROD_URL,
 } from '@binance/derivatives-trading-portfolio-margin';
-import { IExchangeData } from '../../common/interfaces'
+import { IExchangeData, IDetailedPosition } from '../../common/interfaces'
+
+
 /**
  * Интерфейс для данных аккаунта, основанный на ответе API.
  * Свойства необязательны (?), так как API может их не вернуть.
@@ -40,6 +43,10 @@ interface PositionInfo {
     breakEvenPrice?: string;
 }
 
+/**
+ * НОВЫЙ ИНТЕРФЕЙС
+ * Интерфейс для детализированных данных по одной позиции в унифицированном формате.
+ */
 
 export class BinanceService {
     private client: DerivativesTradingPortfolioMargin;
@@ -100,6 +107,65 @@ export class BinanceService {
         }
     }
 
+
+    public async getDetailedPositions(): Promise<IDetailedPosition[]> {
+        try {
+            // --- Шаг 1: Получаем основные данные по позициям и интервалы фандинга ---
+            const [positions, fundingInfoResponse] = await Promise.all([
+                this.getPositionInfo(),
+                axios.get('https://fapi.binance.com/fapi/v1/fundingInfo')
+            ]);
+
+            // Создаем карту для быстрого доступа к интервалам фандинга по символу
+            const fundingIntervals = new Map<string, number>();
+            for (const info of fundingInfoResponse.data) {
+                fundingIntervals.set(info.symbol, info.fundingIntervalHours);
+            }
+
+            // --- Шаг 2: Фильтруем только открытые позиции ---
+            const openPositions = positions.filter(p => p.positionAmt && parseFloat(p.positionAmt) !== 0);
+
+            // --- Шаг 3: Для каждой открытой позиции запрашиваем ставку фандинга ---
+            const positionDetailsPromises = openPositions.map(async (position): Promise<IDetailedPosition> => {
+                const symbol = position.symbol!;
+
+                // Запрашиваем premiumIndex для конкретной монеты
+                const premiumIndexResponse = await axios.get(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${symbol}`);
+                const premiumIndexData = premiumIndexResponse.data;
+
+                // --- Шаг 4: Выполняем расчеты ---
+                const notional = position.notional!;
+                const positionAmt = position.positionAmt!;
+                const numericPositionAmt = parseFloat(positionAmt);
+
+                // Базовая ставка фандинга в %
+                let fundingRate = parseFloat(premiumIndexData.lastFundingRate) * 100;
+
+                // Приводим к 8-часовому интервалу
+                const interval = fundingIntervals.get(symbol);
+                if (interval === 4) {
+                    fundingRate *= 2;
+                }
+
+                return {
+                    coin: symbol.replace(/USDT|USDC$/, ''),
+                    notional: notional,
+                    size: Math.abs(numericPositionAmt),
+                    side: numericPositionAmt > 0 ? 'L' : 'S',
+                    exchange: 'B',
+                    fundingRate: fundingRate, // Добавляем рассчитанный фандинг
+                };
+            });
+
+            // --- Шаг 5: Ожидаем выполнения всех запросов и возвращаем результат ---
+            return Promise.all(positionDetailsPromises);
+
+        } catch (err) {
+            console.error('Error fetching or processing Binance detailed positions:', err);
+            const message = this.getErrorMessage(err);
+            throw new Error(`Failed to get detailed positions from Binance: ${message}`);
+        }
+    }
 
     public async calculateAccountLeverage(): Promise<IExchangeData> {
         try {
