@@ -5,22 +5,10 @@ import { ec, typedData as starkTypedData, TypedData, shortString } from 'starkne
 import { getUnixTime } from 'date-fns';
 import { IExchangeData, IDetailedPosition, IParadexAccountResponse, IParadexPosition, IAuthRequest, IParadexPositionsResponse } from '../../common/interfaces';
 
-// =================================================================
-// ИНТЕРФЕЙСЫ
-// =================================================================
-
 type UnixTime = number;
-
-// =================================================================
-// КОНСТАНТЫ
-// =================================================================
 
 const PARADEX_API_URL = 'https://api.prod.paradex.trade/v1';
 const STARKNET_CHAIN_ID = shortString.encodeShortString("PRIVATE_SN_PARACLEAR_MAINNET");
-
-// =================================================================
-// СЕРВИС
-// =================================================================
 
 export class ParadexService {
     private readonly SEVEN_DAYS_MS = 5 * 60 * 1000;
@@ -42,7 +30,6 @@ export class ParadexService {
         this.privateKey = key;
     }
 
-    // --- ПРИВАТНЫЕ МЕТОДЫ АУТЕНТИФИКАЦИИ ---
 
     private getErrorMessage(error: unknown): string {
         if (axios.isAxiosError(error)) {
@@ -99,7 +86,7 @@ export class ParadexService {
             const response = await axios.post(`${PARADEX_API_URL}/auth`, {}, { headers });
 
             this.jwtToken = response.data.jwt_token;
-            this.tokenExpiration = Date.now() + this.SEVEN_DAYS_MS - (60 * 60 * 1000); // Кэш на 7 дней минус 1 час
+            this.tokenExpiration = Date.now() + this.SEVEN_DAYS_MS - (60 * 60 * 1000); // Кэш на 1 час
 
             return this.jwtToken!;
         } catch (error) {

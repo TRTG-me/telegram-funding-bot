@@ -65,8 +65,6 @@ async function start() {
     // Затем создаем контроллер, передав ему только что созданный сервис
     const totalPositionsController = new TotalPositionsController(totalPositionsService);
 
-
-
     const summaryService = new SummaryService(
         binanceService,
         hyperliquidService,
