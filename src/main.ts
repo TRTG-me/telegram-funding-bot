@@ -3,8 +3,6 @@ import { bot } from './core/bot';
 
 import { HyperliquidController } from './modules/hyperliquid/hyperliquid.controller';
 import { HyperliquidService } from './modules/hyperliquid/hyperliquid.service';
-import { CalculatorController } from './modules/calculator/calculator.controller';
-import { CalculatorService } from './modules/calculator/calculator.service';
 import { BinanceController } from './modules/binance/binance.controller';
 import { BinanceService } from './modules/binance/binance.service';
 import { ParadexController } from './modules/paradex/paradex.controller';
@@ -19,16 +17,17 @@ import { RankingService } from './modules/ranking/ranking.service';
 import { RankingController } from './modules/ranking/ranking.controller';
 import { SummaryController } from './modules/summary/summary.controller'
 import { SummaryService } from './modules/summary/summary.service';
+import { TotalPositionsController } from './modules/totalPositions/totalPositions.controller';
+import { TotalPositionsService } from './modules/totalPositions/totalPositions.service';
 
 
 import { message } from 'telegraf/filters';
 
 // --- ИЗМЕНЕНО: Добавляем новую строку с кнопками для уведомлений ---
 const mainMenuKeyboard = Markup.keyboard([
-    ['🔎 HL', '✖️ Калькулятор', 'Extended'],
-    ['BIN', 'Paradex', 'Lighter'],
-    ['🔔 Включить Alert', '🔕 Выключить Alert'],
-    ['✏️ Изменить ранги', 'Плечи и Эквити']
+
+    ['✏️ Изменить ранги', 'Плечи и Эквити'],
+    ['📊 Сверка Позиций']
 ]).resize();
 
 const userState = new Map<number, string>();
@@ -37,9 +36,6 @@ async function start() {
     // --- Инициализация всех сервисов и контроллеров ---
     const hyperliquidService = new HyperliquidService();
     const hyperliquidController = new HyperliquidController(hyperliquidService, userState);
-
-    const calculatorService = new CalculatorService();
-    const calculatorController = new CalculatorController(calculatorService, userState);
 
     const binanceService = new BinanceService();
     const binanceController = new BinanceController(binanceService, userState);
@@ -58,6 +54,18 @@ async function start() {
 
     const rankingService = new RankingService();
     const rankingController = new RankingController(rankingService, userState);
+
+    const totalPositionsService = new TotalPositionsService(
+        binanceService,
+        hyperliquidService,
+        paradexService,
+        lighterService,
+        extendedService
+    );
+    // Затем создаем контроллер, передав ему только что созданный сервис
+    const totalPositionsController = new TotalPositionsController(totalPositionsService);
+
+
 
     const summaryService = new SummaryService(
         binanceService,
@@ -85,7 +93,7 @@ async function start() {
         const currentState = userState.get(userId);
 
         // --- ИЗМЕНЕНО: Добавляем названия новых кнопок в проверку ---
-        const mainMenuCommands = ['🔎 HL', '✖️ Калькулятор', 'BIN', 'Paradex', 'Lighter', '🔔 Включить Alert', '🔕 Выключить Alert', 'Extended', '✏️ Изменить ранги', 'Плечи и Эквити'];
+        const mainMenuCommands = ['🔎 HL', '✖️ Калькулятор', 'BIN', 'Paradex', 'Lighter', '🔔 Включить Alert', '🔕 Выключить Alert', 'Extended', '✏️ Изменить ранги', 'Плечи и Эквити', '📊 Сверка Позиций'];
 
         if (mainMenuCommands.includes(text)) {
             userState.delete(userId); // Сбрасываем предыдущее состояние!
@@ -95,9 +103,7 @@ async function start() {
                     hyperliquidController.onWalletAddressReceived(ctx, mainMenuKeyboard);
                     return;
 
-                case '✖️ Калькулятор':
-                    calculatorController.onMultiplyRequest(ctx, mainMenuKeyboard);
-                    return;
+
 
                 case 'BIN':
                     binanceController.onEquityRequest(ctx, mainMenuKeyboard);
@@ -128,6 +134,9 @@ async function start() {
                 case 'Плечи и Эквити':
                     return summaryController.sendSummaryTable(ctx);
 
+                case '📊 Сверка Позиций':
+                    return totalPositionsController.displayAggregatedPositions(ctx);
+
             }
         }
 
@@ -136,10 +145,7 @@ async function start() {
         //     hyperliquidController.onWalletAddressReceived(ctx, mainMenuKeyboard);
         //     return;
         // }
-        if (currentState === 'awaiting_multiplication_numbers') {
-            calculatorController.onNumbersReceived(ctx, mainMenuKeyboard);
-            return;
-        }
+
         if (currentState === 'awaiting_ranks_json') { // Новое состояние
             return rankingController.onRanksJsonReceived(ctx);
         }

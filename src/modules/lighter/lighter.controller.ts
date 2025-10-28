@@ -17,7 +17,8 @@ export class LighterController {
 
             // 1. Вызываем единый метод сервиса, который делает всю работу
             const accInfo = await this.lighterService.calculateLeverage();
-
+            const posInfo = await this.lighterService.getDetailedPositions()
+            console.log(posInfo)
             // 2. Форматируем полученное число для красивого вывода
             const formattedLeverage = accInfo.leverage.toFixed(3);
             const formattedEquity = accInfo.accountEquity.toFixed(3);
