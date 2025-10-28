@@ -18,10 +18,7 @@ export class RankingController {
         await ctx.replyWithMarkdown(message);
     }
 
-    /**
-     * [ИЗМЕНЕНО]
-     * Сначала показывает текущие ранги в формате JSON, а затем просит ввести новые.
-     */
+
     public async onUpdateRanksRequest(ctx: any): Promise<void> {
         // 1. Получаем текущую конфигурацию
         const currentRanks = await this.rankingService.getConfig();

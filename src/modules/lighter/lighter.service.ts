@@ -1,41 +1,5 @@
 import axios from 'axios';
-import { IExchangeData, IDetailedPosition } from '../../common/interfaces'
-
-// =================================================================
-// ИНТЕРФЕЙСЫ
-// =================================================================
-
-interface LighterPosition {
-    symbol?: string;
-    position?: string;
-    position_value?: string;
-    sign?: 1 | -1; // 1 для Long, -1 для Short
-}
-
-interface LighterAccount {
-    available_balance?: string;
-    total_asset_value?: string;
-    positions?: LighterPosition[];
-}
-
-interface LighterApiResponse {
-    accounts?: LighterAccount[];
-}
-
-interface FundingRate {
-    exchange: string;
-    symbol: string;
-    rate: number;
-}
-
-interface FundingRatesResponse {
-    funding_rates?: FundingRate[];
-}
-
-
-// =================================================================
-// СЕРВИС
-// =================================================================
+import { IExchangeData, IDetailedPosition, ILighterApiResponse, IFundingRatesResponseLighter } from '../../common/interfaces'
 
 export class LighterService {
     private readonly API_URL = 'https://mainnet.zklighter.elliot.ai/api/v1';
@@ -59,10 +23,10 @@ export class LighterService {
         return String(error);
     }
 
-    private async getAccountData(): Promise<LighterApiResponse> {
+    private async getAccountData(): Promise<ILighterApiResponse> {
         try {
             const url = `${this.API_URL}/account?by=l1_address&value=${this.l1Address}`;
-            const response = await axios.get<LighterApiResponse>(url, {
+            const response = await axios.get<ILighterApiResponse>(url, {
                 headers: { 'accept': 'application/json' }
             });
             return response.data;
@@ -81,7 +45,7 @@ export class LighterService {
             // --- Шаг 1: Параллельно запрашиваем данные аккаунта и ставки фандинга ---
             const [accountResponse, fundingResponse] = await Promise.all([
                 this.getAccountData(),
-                axios.get<FundingRatesResponse>(`${this.API_URL}/funding-rates`)
+                axios.get<IFundingRatesResponseLighter>(`${this.API_URL}/funding-rates`)
             ]);
 
             // --- Шаг 2: Проверяем наличие и структуру данных ---

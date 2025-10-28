@@ -32,7 +32,7 @@ export class BinanceController {
             const a = await this.binanceService.getDetailedPositions()
             const accountInfo = await this.binanceService.getAccountInfo();
 
-            const info = await this.binanceService.calculateAccountLeverage()
+            const info = await this.binanceService.calculateLeverage()
 
             if (isFinite(info.leverage) && isAccountInfoValid(accountInfo)) {
 
@@ -60,7 +60,7 @@ export class BinanceController {
             }
 
         } catch (error) {
-            // ... обработка ошибки запроса ...
+
         }
     }
 }

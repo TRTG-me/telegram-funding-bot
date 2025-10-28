@@ -73,3 +73,98 @@ export interface IPositionInfoBin {
     maxNotionalValue?: string;
     breakEvenPrice?: string;
 }
+export interface IExtendedBalanceData {
+    exposure?: string;
+    equity?: string;
+    initialMargin?: string;
+}
+export interface IExtendedApiResponse {
+    status?: string;
+    data?: IExtendedBalanceData;
+}
+export interface IExtendedPosition {
+    market: string;
+    status: 'OPENED' | 'CLOSED';
+    side: 'LONG' | 'SHORT';
+    size: string;
+    value: string;
+}
+export interface IExtendedPositionsResponse {
+    status: 'OK' | 'ERROR';
+    data: IExtendedPosition[];
+}
+
+export interface IExtendedMarketStatsData {
+    fundingRate: string;
+}
+
+export interface IExtendedMarketStatsResponse {
+    status: 'OK' | 'ERROR';
+    data: IExtendedMarketStatsData;
+}
+
+export interface IAssetNameInfoHyper {
+    name: string;
+}
+export interface IAssetDataContextHyper {
+    funding: string;
+}
+// Тип для "склеенных" данных по одному активу
+export interface ICombinedAssetCtxHyper {
+    name: string;
+    funding: string;
+}
+export interface IHyperliquidAccountInfo {
+    marginSummary?: {
+        accountValue?: string;
+        totalNtlPos?: string;
+    };
+    assetPositions?: {
+        position: {
+            coin?: string;
+            szi?: string;
+            positionValue?: string;
+        }
+    }[];
+    crossMaintenanceMarginUsed?: string;
+}
+// Детали одной открытой позиции для отображения
+export interface IPositionDetailHyper {
+    coin: string;
+    side: 'Long' | 'Short';
+    size: number;
+    notionalValue: number;
+    fundingRate: number; // Уже в процентах
+}
+
+export interface IFullAccountSummaryHyper {
+    leverage: number;
+    accountEquity: number;
+}
+
+export interface ILighterPosition {
+    symbol?: string;
+    position?: string;
+    position_value?: string;
+    sign?: 1 | -1; // 1 для Long, -1 для Short
+}
+
+export interface ILighterAccount {
+    available_balance?: string;
+    total_asset_value?: string;
+    positions?: ILighterPosition[];
+}
+
+export interface ILighterApiResponse {
+    accounts?: ILighterAccount[];
+}
+export interface IFundingRateLighter {
+    exchange: string;
+    symbol: string;
+    rate: number;
+}
+
+export interface IFundingRatesResponseLighter {
+    funding_rates?: IFundingRateLighter[];
+}
+

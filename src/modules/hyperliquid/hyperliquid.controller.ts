@@ -1,7 +1,7 @@
 import { Context, Markup } from "telegraf";
 import { message } from "telegraf/filters";
 import { Update } from "telegraf/typings/core/types/typegram";
-import { HyperliquidService, FullAccountSummary } from "./hyperliquid.service"; // Импортируем сервис и наш главный тип
+import { HyperliquidService } from "./hyperliquid.service"; // Импортируем сервис и наш главный тип
 
 // Псевдоним типа для клавиатуры
 type ReplyKeyboard = ReturnType<typeof Markup.keyboard>;
@@ -45,6 +45,7 @@ export class HyperliquidController {
         try {
 
             const summary = await this.hyperliquidService.getDetailedPositions()
+            console.log(summary)
             // // 1. Вызываем сервис и получаем чистый ОБЪЕКТ С ДАННЫМИ
             // const summary: FullAccountSummary = await this.hyperliquidService.getAccountSummary(userAddress);
 

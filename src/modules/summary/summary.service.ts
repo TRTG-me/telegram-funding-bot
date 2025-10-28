@@ -62,8 +62,8 @@ export class SummaryService {
         const ranks = await this.loadRanks();
         // Теперь Promise.allSettled будет работать с одним и тем же типом IExchangeData
         const results = await Promise.allSettled([
-            this.binanceService.calculateAccountLeverage(), // Замените на реальные методы
-            this.hyperliquidService.getAccountSummary(),
+            this.binanceService.calculateLeverage(), // Замените на реальные методы
+            this.hyperliquidService.calculateLeverage(),
             this.paradexService.calculateLeverage(),
             this.lighterService.calculateLeverage(),
             this.extendedService.calculateLeverage(),

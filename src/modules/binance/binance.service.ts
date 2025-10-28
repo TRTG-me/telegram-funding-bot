@@ -125,7 +125,7 @@ export class BinanceService {
         }
     }
 
-    public async calculateAccountLeverage(): Promise<IExchangeData> {
+    public async calculateLeverage(): Promise<IExchangeData> {
         try {
             const [accountInfo, positionInfo] = await Promise.all([
                 this.getAccountInfo(),
