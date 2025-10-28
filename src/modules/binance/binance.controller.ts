@@ -2,24 +2,12 @@
 
 import { Context } from 'telegraf';
 import { BinanceService } from './binance.service';
-
+import { IValidAccountInfoBin } from '../../common/interfaces'
 // Определяем псевдоним типа для клавиатуры
 type ReplyKeyboard = ReturnType<typeof import("telegraf").Markup.keyboard>;
 
-/**
- * Вспомогательная функция для экранирования специальных символов для MarkdownV2.
- * Telegram требует, чтобы символы . ! - = { } ( ) > # + _ | [ ] ` ~ были экранированы обратным слэшем.
- */
-
-// Определяем, как выглядит "валидный" объект для нашей логики
-interface ValidAccountInfo {
-    accountEquity: string;
-    accountStatus: string;
-    // ... другие обязательные поля
-}
-
 // Функция-предохранитель, которая проверяет структуру объекта
-function isAccountInfoValid(data: any): data is ValidAccountInfo {
+function isAccountInfoValid(data: any): data is IValidAccountInfoBin {
     return (
         data &&
         typeof data.accountEquity === 'string' &&
@@ -30,7 +18,6 @@ function escapeMarkdownV2(text: string): string {
     const specialChars = /[_*[\]()~`>#+\-=|{}.!]/g;
     return text.replace(specialChars, '\\$&');
 }
-
 
 export class BinanceController {
     constructor(
@@ -43,25 +30,14 @@ export class BinanceController {
             await ctx.reply('⏳ Запрашиваю данные вашего Portfolio Margin аккаунта...');
 
             const a = await this.binanceService.getDetailedPositions()
-            console.log(a)
             const accountInfo = await this.binanceService.getAccountInfo();
-            // const posInfo = await this.binanceService.getPositionInfo()
-            const info = await this.binanceService.calculateAccountLeverage()
-            // console.log('Получен ответ от API Binance:', accountInfo);
-            // console.log('Pos Bin', posInfo)
-            // // --- ИСПОЛЬЗУЕМ НАШУ ЕДИНУЮ ПРОВЕРКУ ---
-            // if (isAccountInfoValid(accountInfo)) {
-            if (isFinite(info.leverage) && isAccountInfoValid(accountInfo)) {
-                //     // ВНУТРИ ЭТОГО БЛОКА TYPESCRIPT УМНЫЙ!
-                //     // Он знает, что accountInfo имеет тип ValidAccountInfo,
-                //     // а значит, все поля существуют и являются строками.
-                console.log(accountInfo)
-                //     // Никаких ошибок 'undefined' здесь больше не будет!
-                //     const equity = parseFloat(accountInfo.accountEquity).toFixed(2);
-                //     const status = accountInfo.accountStatus; // Тоже безопасно
 
-                //     const escapedEquity = escapeMarkdownV2(equity);
-                //     const escapedStatus = escapeMarkdownV2(status);
+            const info = await this.binanceService.calculateAccountLeverage()
+
+            if (isFinite(info.leverage) && isAccountInfoValid(accountInfo)) {
+
+                console.log(accountInfo)
+
                 const formattedLeverage = info.leverage.toFixed(3);
                 const formattedEquity = info.accountEquity.toFixed(1);
                 const escapedEquity = escapeMarkdownV2(formattedEquity);

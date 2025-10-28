@@ -40,3 +40,36 @@ export interface IAuthRequest extends Record<string, unknown> {
     timestamp: UnixTime;
     expiration: UnixTime;
 }
+export interface IValidAccountInfoBin {
+    accountEquity: string;
+    accountStatus: string;
+
+}
+
+export interface IAccountInfoBin {
+    accountEquity?: string;
+    accountMaintMargin?: string;
+    uniMMR?: string;
+    actualEquity?: string;
+    accountInitialMargin?: string;
+    accountStatus?: string;
+    virtualMaxWithdrawAmount?: string;
+    totalAvailableBalance?: string;
+    totalMarginOpenLoss?: string;
+    updateTime?: number;
+}
+
+export interface IPositionInfoBin {
+    symbol?: string;
+    notional?: string;
+    positionAmt?: string;
+    entryPrice?: string;
+    markPrice?: string;
+    unRealizedProfit?: string;
+    liquidationPrice?: string;
+    leverage?: string;
+    positionSide?: string;
+    updateTime?: number;
+    maxNotionalValue?: string;
+    breakEvenPrice?: string;
+}

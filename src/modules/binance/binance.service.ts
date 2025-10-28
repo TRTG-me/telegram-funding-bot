@@ -4,49 +4,7 @@ import {
     DerivativesTradingPortfolioMargin,
     DERIVATIVES_TRADING_PORTFOLIO_MARGIN_REST_API_PROD_URL,
 } from '@binance/derivatives-trading-portfolio-margin';
-import { IExchangeData, IDetailedPosition } from '../../common/interfaces'
-
-
-/**
- * Интерфейс для данных аккаунта, основанный на ответе API.
- * Свойства необязательны (?), так как API может их не вернуть.
- */
-interface AccountInfo {
-    accountEquity?: string;
-    accountMaintMargin?: string;
-    uniMMR?: string;
-    actualEquity?: string;
-    accountInitialMargin?: string;
-    accountStatus?: string;
-    virtualMaxWithdrawAmount?: string;
-    totalAvailableBalance?: string;
-    totalMarginOpenLoss?: string;
-    updateTime?: number;
-}
-
-/**
- * Интерфейс для данных одной позиции, основанный на ответе API.
- * Свойства необязательны (?).
- */
-interface PositionInfo {
-    symbol?: string;
-    notional?: string;
-    positionAmt?: string;
-    entryPrice?: string;
-    markPrice?: string;
-    unRealizedProfit?: string;
-    liquidationPrice?: string;
-    leverage?: string;
-    positionSide?: string;
-    updateTime?: number;
-    maxNotionalValue?: string;
-    breakEvenPrice?: string;
-}
-
-/**
- * НОВЫЙ ИНТЕРФЕЙС
- * Интерфейс для детализированных данных по одной позиции в унифицированном формате.
- */
+import { IExchangeData, IDetailedPosition, IAccountInfoBin, IPositionInfoBin } from '../../common/interfaces'
 
 export class BinanceService {
     private client: DerivativesTradingPortfolioMargin;
@@ -84,7 +42,7 @@ export class BinanceService {
     }
 
 
-    public async getAccountInfo(): Promise<AccountInfo> {
+    public async getAccountInfo(): Promise<IAccountInfoBin> {
         try {
             const response = await this.client.restAPI.accountInformation();
             return await response.data();
@@ -96,7 +54,7 @@ export class BinanceService {
     }
 
 
-    public async getPositionInfo(): Promise<PositionInfo[]> {
+    public async getPositionInfo(): Promise<IPositionInfoBin[]> {
         try {
             const response = await this.client.restAPI.queryUmPositionInformation();
             return (await response.data()) || [];
