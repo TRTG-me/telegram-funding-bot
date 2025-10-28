@@ -18,7 +18,7 @@ export class SummaryController {
 
             data.forEach(exchange => {
                 const equity = Math.round(exchange.accountEquity);
-                const leverage = `${exchange.emoji}${exchange.leverage.toFixed(1)}`;
+                const leverage = `${exchange.emoji}${exchange.leverage.toFixed(2)}`;
 
                 // --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
                 // Просто оборачиваем содержимое тега <code> в тег <b>

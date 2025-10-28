@@ -21,6 +21,7 @@
   "dependencies": {
     "@binance/connector": "^3.6.1",
     "@binance/derivatives-trading-portfolio-margin": "^6.0.0",
+    "@nestjs/common": "^11.1.8",
     "axios": "^1.12.2",
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.3",

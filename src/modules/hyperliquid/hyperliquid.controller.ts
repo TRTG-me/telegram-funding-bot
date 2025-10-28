@@ -45,7 +45,6 @@ export class HyperliquidController {
         try {
 
             const summary = await this.hyperliquidService.getDetailedPositions()
-            console.log(summary)
             // // 1. Вызываем сервис и получаем чистый ОБЪЕКТ С ДАННЫМИ
             // const summary: FullAccountSummary = await this.hyperliquidService.getAccountSummary(userAddress);
 

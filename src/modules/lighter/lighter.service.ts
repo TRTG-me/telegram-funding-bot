@@ -1,34 +1,40 @@
-// src/modules/lighter/lighter.service.ts
-
 import axios from 'axios';
-import { IExchangeData } from '../../common/interfaces'
+import { IExchangeData, IDetailedPosition } from '../../common/interfaces'
 
 // =================================================================
-// ИНТЕРФЕЙСЫ: "КОНТРАКТЫ" ДЛЯ ДАННЫХ API
+// ИНТЕРФЕЙСЫ
 // =================================================================
 
-// Описывает одну позицию внутри аккаунта
 interface LighterPosition {
     symbol?: string;
-    position?: string;        // Размер позиции, "0.00" если закрыта
+    position?: string;
     position_value?: string;
-
+    sign?: 1 | -1; // 1 для Long, -1 для Short
 }
 
-// Описывает один аккаунт из массива 'accounts'
 interface LighterAccount {
     available_balance?: string;
     total_asset_value?: string;
     positions?: LighterPosition[];
 }
 
-// Описывает корневой объект ответа API
 interface LighterApiResponse {
     accounts?: LighterAccount[];
 }
 
+interface FundingRate {
+    exchange: string;
+    symbol: string;
+    rate: number;
+}
+
+interface FundingRatesResponse {
+    funding_rates?: FundingRate[];
+}
+
+
 // =================================================================
-// СЕРВИС: МОЗГ ПРИЛОЖЕНИЯ
+// СЕРВИС
 // =================================================================
 
 export class LighterService {
@@ -53,9 +59,6 @@ export class LighterService {
         return String(error);
     }
 
-    /**
-     * Получает "сырые" данные об аккаунте с API.
-     */
     private async getAccountData(): Promise<LighterApiResponse> {
         try {
             const url = `${this.API_URL}/account?by=l1_address&value=${this.l1Address}`;
@@ -68,25 +71,72 @@ export class LighterService {
         }
     }
 
+    // --- НОВАЯ ФУНКЦИЯ ---
     /**
-     * Выполняет всю логику: получает данные, вычисляет плечо и возвращает число.
+     * Получает и форматирует информацию об открытых позициях в унифицированный вид.
+     * @returns Промис, который разрешается массивом детализированных позиций.
      */
+    public async getDetailedPositions(): Promise<IDetailedPosition[]> {
+        try {
+            // --- Шаг 1: Параллельно запрашиваем данные аккаунта и ставки фандинга ---
+            const [accountResponse, fundingResponse] = await Promise.all([
+                this.getAccountData(),
+                axios.get<FundingRatesResponse>(`${this.API_URL}/funding-rates`)
+            ]);
+
+            // --- Шаг 2: Проверяем наличие и структуру данных ---
+            const account = accountResponse?.accounts?.[0];
+            const fundingRates = fundingResponse?.data?.funding_rates;
+
+            if (!account || !Array.isArray(account.positions) || !Array.isArray(fundingRates)) {
+                throw new Error('Incomplete or invalid data received from Lighter API.');
+            }
+
+            // --- Шаг 3: Создаем карту для быстрого доступа к ставкам фандинга ---
+            const fundingMap = new Map<string, number>();
+            fundingRates
+                .filter(rate => rate.exchange === 'lighter') // Оставляем только фандинг от самой биржи Lighter
+                .forEach(rate => {
+                    fundingMap.set(rate.symbol, rate.rate);
+                });
+
+            // --- Шаг 4: Фильтруем и преобразуем открытые позиции ---
+            const detailedPositions: IDetailedPosition[] = account.positions
+                .filter(p => parseFloat(p.position || '0') !== 0) // Оставляем только открытые
+                .map(position => {
+                    const coin = position.symbol!;
+                    // API отдает ставку уже в виде готового числа, умножаем на 100 для получения процентов
+                    const fundingRate = (fundingMap.get(coin) || 0) * 100;
+
+                    return {
+                        coin: coin,
+                        notional: Math.abs(parseFloat(position.position_value || '0')).toString(),
+                        size: Math.abs(parseFloat(position.position || '0')),
+                        side: position.sign === 1 ? 'L' : 'S',
+                        exchange: 'L', // 'L' для Lighter
+                        fundingRate: fundingRate,
+                    };
+                });
+
+            return detailedPositions;
+
+        } catch (err) {
+            const message = this.getErrorMessage(err);
+            console.error('Error fetching Lighter detailed positions:', err);
+            throw new Error(`Failed to get detailed positions from Lighter: ${message}`);
+        }
+    }
+
+
     public async calculateLeverage(): Promise<IExchangeData> {
         try {
             const response = await this.getAccountData();
 
-            // 1. "Фейсконтроль": Проверяем наличие и структуру данных
-            const account = response?.accounts?.[0]; // Берем первый аккаунт
-            if (
-                !account ||
-                typeof account.total_asset_value !== 'string' ||
-                typeof account.available_balance !== 'string' ||
-                !Array.isArray(account.positions)
-            ) {
+            const account = response?.accounts?.[0];
+            if (!account || typeof account.total_asset_value !== 'string' || typeof account.available_balance !== 'string' || !Array.isArray(account.positions)) {
                 throw new Error('Incomplete or invalid data received from Lighter API.');
             }
 
-            // 2. Парсим основные значения
             const totalAssetValue = parseFloat(account.total_asset_value);
             const availableBalance = parseFloat(account.available_balance);
 
@@ -94,29 +144,22 @@ export class LighterService {
                 throw new Error('Failed to parse financial data from Lighter API response.');
             }
 
-            // 3. Рассчитываем числитель (сумма стоимостей открытых позиций)
             const totalPositionValue = account.positions
-                // Фильтруем только открытые позиции (где размер не равен нулю)
                 .filter(p => parseFloat(p.position || '0') !== 0)
-                // Суммируем, используя МОДУЛЬ (Math.abs) для корректного учета шортов
                 .reduce((sum, p) => sum + Math.abs(parseFloat(p.position_value || '0')), 0);
 
-            // Если открытых позиций нет, плечо равно 0
             if (totalPositionValue === 0) {
                 return { leverage: 0, accountEquity: totalAssetValue };
             }
 
-            // 4. Рассчитываем знаменатель по вашей формуле
             const maintenanceMargin = (totalAssetValue - availableBalance) * 0.6;
             const denominator = totalAssetValue - maintenanceMargin;
 
             if (denominator <= 0) {
-                throw new Error('Cannot calculate leverage: Invalid denominator (total asset value is less than or equal to maintenance margin).');
+                throw new Error('Cannot calculate leverage: Invalid denominator.');
             }
 
-            // 5. Финальный расчет и проверка
             const leverage = totalPositionValue / denominator;
-
             if (!isFinite(leverage)) {
                 throw new Error('Leverage calculation resulted in a non-finite number.');
             }

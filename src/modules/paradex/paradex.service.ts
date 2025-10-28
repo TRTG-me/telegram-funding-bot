@@ -23,7 +23,7 @@ const STARKNET_CHAIN_ID = shortString.encodeShortString("PRIVATE_SN_PARACLEAR_MA
 // =================================================================
 
 export class ParadexService {
-    private readonly SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+    private readonly SEVEN_DAYS_MS = 5 * 60 * 1000;
     private readonly accountAddress: string;
     private readonly privateKey: string;
 

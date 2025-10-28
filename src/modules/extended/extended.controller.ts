@@ -18,7 +18,7 @@ export class ExtendedController {
 
             // 1. Вызываем единый метод сервиса, который делает всю работу
             const accInfo = await this.extendedService.calculateLeverage();
-
+            const posInfo = await this.extendedService.getDetailedPositions();
             // 2. Форматируем полученное число для красивого вывода
             const formattedLeverage = accInfo.leverage.toFixed(2);
             const formattedEquity = accInfo.accountEquity.toFixed(2);
