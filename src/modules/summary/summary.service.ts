@@ -79,11 +79,22 @@ export class SummaryService {
                 const { leverage, accountEquity } = result.value;
                 // 4. Прямо здесь вычисляем эмодзи и добавляем его в объект.
                 const emoji = this.getEmojiForLeverage(leverage, ranks);
+                // Логируем результат для отладки: какая биржа и какое плечо пришло
+                try {
+                    console.log(`${name} - ${leverage.toFixed(2)}`);
+                } catch (e) {
+                    console.log(`${name} - ${String(leverage)}`);
+                }
 
                 return { name, leverage, accountEquity, emoji };
             } else {
-                // В случае ошибки возвращаем объект-заглушку.
+                // В случае ошибки возвращаем объект-заглушку и логируем причину.
                 console.error(`Ошибка при получении данных от ${name}:`, result.reason);
+                try {
+                    console.log(`${name} - ERROR: ${String(result.reason)}`);
+                } catch (e) {
+                    console.log(`${name} - ERROR`);
+                }
                 return { name, leverage: 0, accountEquity: 0, emoji: '❗️' };
             }
         });

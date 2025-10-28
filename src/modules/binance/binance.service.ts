@@ -21,7 +21,7 @@ export class BinanceService {
             apiKey: apiKey,
             apiSecret: apiSecret,
             basePath: DERIVATIVES_TRADING_PORTFOLIO_MARGIN_REST_API_PROD_URL,
-            recvWindow: 10000,
+            recvWindow: 20000,
         };
 
         this.client = new DerivativesTradingPortfolioMargin({ configurationRestAPI });

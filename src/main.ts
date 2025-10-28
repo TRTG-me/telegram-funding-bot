@@ -1,6 +1,8 @@
 import { Markup } from 'telegraf';
 import { bot } from './core/bot';
+import { message } from 'telegraf/filters';
 
+// Импорт всех модулей
 import { HyperliquidController } from './modules/hyperliquid/hyperliquid.controller';
 import { HyperliquidService } from './modules/hyperliquid/hyperliquid.service';
 import { BinanceController } from './modules/binance/binance.controller';
@@ -15,146 +17,125 @@ import { ExtendedController } from './modules/extended/extended.controller';
 import { ExtendedService } from './modules/extended/extended.service';
 import { RankingService } from './modules/ranking/ranking.service';
 import { RankingController } from './modules/ranking/ranking.controller';
-import { SummaryController } from './modules/summary/summary.controller'
+import { SummaryController } from './modules/summary/summary.controller';
 import { SummaryService } from './modules/summary/summary.service';
 import { TotalPositionsController } from './modules/totalPositions/totalPositions.controller';
 import { TotalPositionsService } from './modules/totalPositions/totalPositions.service';
 
-
-import { message } from 'telegraf/filters';
-
-// --- ИЗМЕНЕНО: Добавляем новую строку с кнопками для уведомлений ---
+// --- Клавиатура и управление состоянием ---
 const mainMenuKeyboard = Markup.keyboard([
-
-    ['✏️ Изменить ранги', 'Плечи и Эквити'],
-    ['📊 Сверка Позиций']
+    ['Плечи и Эквити', '📊 Сверка Позиций'],
+    ['✏️ Изменить ранги'],
+    ['Включить Alert', 'Выключить Alert']
 ]).resize();
 
 const userState = new Map<number, string>();
 
 async function start() {
-    // --- Инициализация всех сервисов и контроллеров ---
-    const hyperliquidService = new HyperliquidService();
-    const hyperliquidController = new HyperliquidController(hyperliquidService, userState);
-
+    // --- 1. Инициализация всех СЕРВИСОВ ---
     const binanceService = new BinanceService();
-    const binanceController = new BinanceController(binanceService, userState);
-
+    const hyperliquidService = new HyperliquidService();
     const paradexService = new ParadexService();
-    const paradexController = new ParadexController(paradexService, userState);
-
     const lighterService = new LighterService();
-    const lighterController = new LighterController(lighterService, userState);
+    const extendedService = new ExtendedService();
+    const rankingService = new RankingService();
 
-    const notificationService = new NotificationService(bot);
+    // Сервисы-агрегаторы
+    const summaryService = new SummaryService(
+        binanceService, hyperliquidService, paradexService, lighterService, extendedService
+    );
+    const totalPositionsService = new TotalPositionsService(
+        binanceService, hyperliquidService, paradexService, lighterService, extendedService
+    );
+    const notificationService = new NotificationService(
+        bot, binanceService, hyperliquidService, paradexService, lighterService, extendedService
+    );
+
+    // --- 2. Инициализация всех КОНТРОЛЛЕРОВ ---
+    const hyperliquidController = new HyperliquidController(hyperliquidService, userState);
+    const binanceController = new BinanceController(binanceService, userState);
+    const paradexController = new ParadexController(paradexService, userState);
+    const lighterController = new LighterController(lighterService, userState);
+    const extendedController = new ExtendedController(extendedService, userState);
+    const rankingController = new RankingController(rankingService, userState);
+    const summaryController = new SummaryController(summaryService);
+    const totalPositionsController = new TotalPositionsController(totalPositionsService);
     const notificationController = new NotificationController(notificationService);
 
-    const extendedService = new ExtendedService();
-    const extendedController = new ExtendedController(extendedService, userState);
-
-    const rankingService = new RankingService();
-    const rankingController = new RankingController(rankingService, userState);
-
-    const totalPositionsService = new TotalPositionsService(
-        binanceService,
-        hyperliquidService,
-        paradexService,
-        lighterService,
-        extendedService
-    );
-    // Затем создаем контроллер, передав ему только что созданный сервис
-    const totalPositionsController = new TotalPositionsController(totalPositionsService);
-
-    const summaryService = new SummaryService(
-        binanceService,
-        hyperliquidService,
-        paradexService,
-        lighterService,
-        extendedService
-    );
-    const summaryController = new SummaryController(summaryService);
-
-    // --- Регистрация команды /start ---
+    // --- 3. Регистрация команды /start ---
     bot.start((ctx) => {
-        // При старте на всякий случай сбрасываем состояние
-        userState.delete(ctx.from.id);
-        ctx.reply(
-            'Привет! Используйте меню внизу.',
-            mainMenuKeyboard
-        );
+        if (ctx.from) {
+            userState.delete(ctx.from.id);
+        }
+        ctx.reply('Привет! Используйте меню внизу.', mainMenuKeyboard);
     });
 
-    // --- Общий обработчик-маршрутизатор для всех текстовых сообщений ---
+    // --- 4. Главный обработчик текстовых сообщений (ИСПРАВЛЕННАЯ ЛОГИКА) ---
     bot.on(message('text'), (ctx) => {
-        const userId = ctx.from.id;
-        const text = ctx.message.text;
+        const userId = ctx.from?.id;
+        if (!userId) return;
+
         const currentState = userState.get(userId);
+        const text = ctx.message.text;
 
-        // --- ИЗМЕНЕНО: Добавляем названия новых кнопок в проверку ---
-        const mainMenuCommands = ['🔎 HL', '✖️ Калькулятор', 'BIN', 'Paradex', 'Lighter', '🔔 Включить Alert', '🔕 Выключить Alert', 'Extended', '✏️ Изменить ранги', 'Плечи и Эквити', '📊 Сверка Позиций'];
+        const mainMenuCommands = ['Плечи и Эквити', '📊 Сверка Позиций', '✏️ Изменить ранги', 'Включить Alert', 'Выключить Alert'];
 
+        // --- ЛОГИЧЕСКИЙ БЛОК 1: ПРИОРИТЕТНАЯ ОБРАБОТКА КОМАНД МЕНЮ ---
+        // Сначала проверяем, является ли сообщение командой из главного меню.
         if (mainMenuCommands.includes(text)) {
-            userState.delete(userId); // Сбрасываем предыдущее состояние!
+            // Если это команда, мы ОБЯЗАТЕЛЬНО сбрасываем любое предыдущее состояние.
+            userState.delete(userId);
 
             switch (text) {
-                case '🔎 HL':
-                    hyperliquidController.onWalletAddressReceived(ctx, mainMenuKeyboard);
-                    return;
-
-
-
-                case 'BIN':
-                    binanceController.onEquityRequest(ctx, mainMenuKeyboard);
-                    return;
-                case 'Paradex':
-                    paradexController.onAccountRequest(ctx, mainMenuKeyboard);
-                    return;
-
-                case 'Lighter':
-                    lighterController.onAccountRequestL(ctx, mainMenuKeyboard);
-                    return;
-
-                case 'Extended':
-                    extendedController.onAccountRequest(ctx, mainMenuKeyboard);
-                    return;
-
-                case '🔔 Включить Alert':
-                    notificationController.startMonitoring(ctx);
-                    return;
-
-                case '🔕 Выключить Alert':
-                    notificationController.stopMonitoring(ctx);
-                    return;
-
-                case '✏️ Изменить ранги':
-                    return rankingController.onUpdateRanksRequest(ctx);
-
                 case 'Плечи и Эквити':
                     return summaryController.sendSummaryTable(ctx);
-
                 case '📊 Сверка Позиций':
                     return totalPositionsController.displayAggregatedPositions(ctx);
-
+                case '✏️ Изменить ранги':
+                    return rankingController.onUpdateRanksRequest(ctx);
+                case 'Включить Alert':
+                    return notificationController.startMonitoring(ctx);
+                case 'Выключить Alert':
+                    return notificationController.stopMonitoring(ctx);
             }
         }
-
-        // Если это не команда из меню, тогда проверяем состояние
-        // if (currentState === 'awaiting_wallet_address') {
-        //     hyperliquidController.onWalletAddressReceived(ctx, mainMenuKeyboard);
-        //     return;
-        // }
-
-        if (currentState === 'awaiting_ranks_json') { // Новое состояние
+        // --- ЛОГИЧЕСКИЙ БЛОК 2: ОБРАБОТКА СОСТОЯНИЙ ---
+        // Этот блок выполнится, только если сообщение НЕ является командой из меню.
+        else if (currentState === 'awaiting_ranks_json') {
             return rankingController.onRanksJsonReceived(ctx);
         }
-
-        // Если мы дошли до сюда, значит, это неизвестная команда
-        ctx.reply('Неизвестная команда. Пожалуйста, используйте кнопки внизу.', mainMenuKeyboard);
+        // --- ЛОГИЧЕСКИЙ БЛОК 3: НЕИЗВЕСТНАЯ КОМАНДА ---
+        // Этот блок выполнится, только если сообщение не является ни командой, ни вводом для состояния.
+        else {
+            ctx.reply('Неизвестная команда. Пожалуйста, используйте кнопки внизу.', mainMenuKeyboard);
+        }
     });
 
-    // --- Запуск бота ---
+    // --- 5. Запуск бота ---
     await bot.launch();
-    console.log('Бот успешно запущен с модулем уведомлений!');
+    console.log('Бот успешно запущен со всеми модулями!');
+    const gracefulShutdown = (signal: string) => {
+        console.log(`\n[Graceful Shutdown] Получен сигнал ${signal}. Начинаем завершение работы...`);
+
+        // 1. Останавливаем все активные таймеры мониторинга
+        notificationService.stopAllMonitors();
+
+        // 2. Останавливаем сам бот (он перестает получать новые сообщения)
+        bot.stop(signal);
+
+        console.log('[Graceful Shutdown] Бот остановлен. Процесс завершается.');
+
+        // 3. Завершаем процесс Node.js
+        process.exit(0);
+    };
+
+    // Слушаем системные сигналы на завершение
+    // SIGINT - это сигнал, который отправляется при нажатии Ctrl+C
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+    // SIGTERM - это стандартный сигнал для "вежливого" завершения процесса
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 }
 
+// Запускаем всю нашу асинхронную функцию
 start();
