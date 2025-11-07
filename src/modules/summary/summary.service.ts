@@ -81,9 +81,9 @@ export class SummaryService {
                 const emoji = this.getEmojiForLeverage(leverage, ranks);
                 // Логируем результат для отладки: какая биржа и какое плечо пришло
                 try {
-                    console.log(`${name} - ${leverage.toFixed(2)}`);
+                    //console.log(`${name} - ${leverage.toFixed(2)}`);
                 } catch (e) {
-                    console.log(`${name} - ${String(leverage)}`);
+                    // console.log(`${name} - ${String(leverage)}`);
                 }
 
                 return { name, leverage, accountEquity, emoji };

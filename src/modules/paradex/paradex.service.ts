@@ -113,10 +113,10 @@ export class ParadexService {
     // --- НОВЫЕ ПРИВАТНЫЕ HELPER-МЕТОДЫ ДЛЯ УСТРАНЕНИЯ ДУБЛИРОВАНИЯ ---
 
     private _calculatePositionNotional(position: IParadexPosition): number {
-        const absCost = Math.abs(parseFloat(position.cost_usd || '0'));
+        const Cost = parseFloat(position.cost_usd || '0');
         const unrealizedPnl = parseFloat(position.unrealized_pnl || '0');
         const unrealizedFundingPnl = parseFloat(position.unrealized_funding_pnl || '0');
-        return absCost - unrealizedPnl + unrealizedFundingPnl;
+        return Math.abs(Cost + unrealizedPnl - unrealizedFundingPnl);
     }
 
     private async _getOpenPositions(jwtToken: string): Promise<IParadexPosition[]> {
@@ -153,9 +153,7 @@ export class ParadexService {
                 const notional = this._calculatePositionNotional(position);
 
                 let fundingRate = parseFloat(marketSummary.funding_rate || '0');
-                if (marketDetails.funding_period_hours === 4) {
-                    fundingRate *= 2;
-                }
+                fundingRate = (fundingRate / marketDetails.funding_period_hours) * 8;
 
                 return {
                     coin: symbol.replace(/-USD-PERP$/, ''),

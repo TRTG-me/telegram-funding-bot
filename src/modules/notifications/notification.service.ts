@@ -26,7 +26,7 @@ export class NotificationService {
     // Кеш по биржам: хранит последний успешный ответ и метку времени
     private cache: Map<string, { ts: number; data?: { leverage: number; accountEquity: number } }> = new Map();
     // TTL кеша в миллисекундах
-    private CACHE_TTL = 35_000; // 30 секунд
+    private CACHE_TTL = 25_000; // 30 секунд
     // Счётчики последовательных ошибок: Map<userId, Map<exchangeName, count>>
     private errorCounters: Map<number, Map<string, number>> = new Map();
     // Сколько последовательных ошибок требуется для уведомления
