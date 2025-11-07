@@ -73,7 +73,7 @@ export class BinanceService {
                 this.getPositionInfo(),
                 axios.get('https://fapi.binance.com/fapi/v1/fundingInfo')
             ]);
-
+            console.log(positions);
             // Создаем карту для быстрого доступа к интервалам фандинга по символу
             const fundingIntervals = new Map<string, number>();
             for (const info of fundingInfoResponse.data) {
@@ -92,7 +92,7 @@ export class BinanceService {
                 const premiumIndexData = premiumIndexResponse.data;
 
                 // --- Шаг 4: Выполняем расчеты ---
-                const notional = position.notional!;
+                const notional = Math.abs(parseFloat(position.notional!));
                 const positionAmt = position.positionAmt!;
                 const numericPositionAmt = parseFloat(positionAmt);
 
@@ -107,7 +107,7 @@ export class BinanceService {
 
                 return {
                     coin: symbol.replace(/USDT|USDC$/, ''),
-                    notional: notional,
+                    notional: notional.toString(),
                     size: Math.abs(numericPositionAmt),
                     side: numericPositionAmt > 0 ? 'L' : 'S',
                     exchange: 'B',
@@ -137,7 +137,7 @@ export class BinanceService {
             }
 
             const totalNotional = positionInfo.reduce((sum, position) => {
-                return sum + parseFloat(position.notional || '0');
+                return sum + Math.abs(parseFloat(position.notional || '0'));
             }, 0);
 
             const accountEquity = parseFloat(accountInfo.accountEquity);

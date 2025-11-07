@@ -26,7 +26,7 @@ import { TotalPositionsService } from './modules/totalPositions/totalPositions.s
 const mainMenuKeyboard = Markup.keyboard([
     ['Плечи и Эквити', '📊 Сверка Позиций'],
     ['✏️ Изменить ранги'],
-    ['Включить Alert', 'Выключить Alert']
+    ['Включить Alert', 'Выключить Alert'], ['P']
 ]).resize();
 
 const userState = new Map<number, string>();
@@ -78,7 +78,7 @@ async function start() {
         const currentState = userState.get(userId);
         const text = ctx.message.text;
 
-        const mainMenuCommands = ['Плечи и Эквити', '📊 Сверка Позиций', '✏️ Изменить ранги', 'Включить Alert', 'Выключить Alert'];
+        const mainMenuCommands = ['Плечи и Эквити', '📊 Сверка Позиций', '✏️ Изменить ранги', 'Включить Alert', 'Выключить Alert', 'P'];
 
         // --- ЛОГИЧЕСКИЙ БЛОК 1: ПРИОРИТЕТНАЯ ОБРАБОТКА КОМАНД МЕНЮ ---
         // Сначала проверяем, является ли сообщение командой из главного меню.
@@ -97,6 +97,9 @@ async function start() {
                     return notificationController.startMonitoring(ctx);
                 case 'Выключить Alert':
                     return notificationController.stopMonitoring(ctx);
+                case 'P':
+                    return paradexController.onAccountRequest(ctx, mainMenuKeyboard);
+
             }
         }
         // --- ЛОГИЧЕСКИЙ БЛОК 2: ОБРАБОТКА СОСТОЯНИЙ ---
