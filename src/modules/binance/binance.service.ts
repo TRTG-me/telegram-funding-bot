@@ -73,8 +73,6 @@ export class BinanceService {
                 this.getPositionInfo(),
                 axios.get('https://fapi.binance.com/fapi/v1/fundingInfo')
             ]);
-            console.log(positions);
-            // Создаем карту для быстрого доступа к интервалам фандинга по символу
             const fundingIntervals = new Map<string, number>();
             for (const info of fundingInfoResponse.data) {
                 fundingIntervals.set(info.symbol, info.fundingIntervalHours);
