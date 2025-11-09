@@ -168,3 +168,41 @@ export interface IFundingRatesResponseLighter {
     funding_rates?: IFundingRateLighter[];
 }
 
+export interface IFundingResultRow {
+    coin: string;
+    notional: number;
+    exchanges: string;
+    funding_1d: number;
+    funding_3d: number;
+    funding_7d: number;
+    funding_14d: number;
+}
+
+export interface IUnhedgedFundingResultRow {
+    coin: string;
+    notional: number;
+    exchange: string;
+    side: 'LONG' | 'SHORT';
+    funding_1d: number;
+    funding_3d: number;
+    funding_7d: number;
+    funding_14d: number;
+}
+
+export interface IHistoricalFundingData {
+    hedged: IFundingResultRow[];
+    unhedged: IUnhedgedFundingResultRow[];
+}
+
+export interface IFundingToolsData {
+    contract_1_section?: string;
+    contract_1_total_funding?: number;
+    contract_2_section?: string;
+    contract_2_total_funding?: number;
+}
+export interface IFundingToolsResponse { data: IFundingToolsData[]; }
+export interface IParadexMarket {
+    base_currency?: string;
+    funding_period_hours?: number;
+}
+export interface IParadexMarketsResponse { results: IParadexMarket[]; }

@@ -21,12 +21,14 @@ import { SummaryController } from './modules/summary/summary.controller';
 import { SummaryService } from './modules/summary/summary.service';
 import { TotalPositionsController } from './modules/totalPositions/totalPositions.controller';
 import { TotalPositionsService } from './modules/totalPositions/totalPositions.service';
+import { TotalFundingsController } from './modules/totalFundings/totalFundings.controller';
+import { TotalFundingsService } from './modules/totalFundings/totalFundings.service';
+
 
 // --- Клавиатура и управление состоянием ---
 const mainMenuKeyboard = Markup.keyboard([
-    ['Плечи и Эквити', '📊 Сверка Позиций'],
-    ['✏️ Изменить ранги'],
-    ['Включить Alert', 'Выключить Alert'], ['P']
+    ['Плечи', 'Позиции', 'Фандинги'],
+    ['Включить Alert', 'Выключить Alert', '✏️Изменить ранги']
 ]).resize();
 
 const userState = new Map<number, string>();
@@ -51,6 +53,11 @@ async function start() {
         bot, binanceService, hyperliquidService, paradexService, lighterService, extendedService
     );
 
+    const totalFundingsService = new TotalFundingsService(
+        totalPositionsService
+    );
+
+
     // --- 2. Инициализация всех КОНТРОЛЛЕРОВ ---
     const hyperliquidController = new HyperliquidController(hyperliquidService, userState);
     const binanceController = new BinanceController(binanceService, userState);
@@ -61,6 +68,7 @@ async function start() {
     const summaryController = new SummaryController(summaryService);
     const totalPositionsController = new TotalPositionsController(totalPositionsService);
     const notificationController = new NotificationController(notificationService);
+    const totalFundingsController = new TotalFundingsController(totalFundingsService);
 
     // --- 3. Регистрация команды /start ---
     bot.start((ctx) => {
@@ -78,7 +86,7 @@ async function start() {
         const currentState = userState.get(userId);
         const text = ctx.message.text;
 
-        const mainMenuCommands = ['Плечи и Эквити', '📊 Сверка Позиций', '✏️ Изменить ранги', 'Включить Alert', 'Выключить Alert', 'P'];
+        const mainMenuCommands = ['Плечи', 'Позиции', '✏️ Изменить ранги', 'Включить Alert', 'Выключить Alert', 'Фандинги'];
 
         // --- ЛОГИЧЕСКИЙ БЛОК 1: ПРИОРИТЕТНАЯ ОБРАБОТКА КОМАНД МЕНЮ ---
         // Сначала проверяем, является ли сообщение командой из главного меню.
@@ -87,9 +95,9 @@ async function start() {
             userState.delete(userId);
 
             switch (text) {
-                case 'Плечи и Эквити':
+                case 'Плечи':
                     return summaryController.sendSummaryTable(ctx);
-                case '📊 Сверка Позиций':
+                case 'Позиции':
                     return totalPositionsController.displayAggregatedPositions(ctx);
                 case '✏️ Изменить ранги':
                     return rankingController.onUpdateRanksRequest(ctx);
@@ -97,8 +105,8 @@ async function start() {
                     return notificationController.startMonitoring(ctx);
                 case 'Выключить Alert':
                     return notificationController.stopMonitoring(ctx);
-                case 'P':
-                    return paradexController.onAccountRequest(ctx, mainMenuKeyboard);
+                case 'Фандинги':
+                    return totalFundingsController.displayHistoricalFunding(ctx);
 
             }
         }
