@@ -2,14 +2,21 @@ import { Injectable } from '@nestjs/common';
 import axios from 'axios';
 import { getUnixTime, subDays } from 'date-fns';
 import { TotalPositionsService, HedgedPair, UnhedgedPosition } from '../totalPositions/totalPositions.service';
-import { IFundingResultRow, IHistoricalFundingData, IUnhedgedFundingResultRow, IFundingToolsData, IFundingToolsResponse, IParadexMarket, IParadexMarketsResponse } from '../../common/interfaces';
+import { IFundingResultRow, IHistoricalFundingData, IUnhedgedFundingResultRow, IFundingToolsResponse, IParadexMarketsResponse } from '../../common/interfaces';
+
+// --- Добавляем локальные интерфейсы, если они не в общем файле ---
+interface ParadexMarket {
+    base_currency?: string;
+    funding_period_hours?: number;
+    asset_kind?: string;
+}
+interface ParadexMarketsResponse { results: ParadexMarket[]; }
 
 
 @Injectable()
 export class TotalFundingsService {
     private readonly FUNDING_TOOLS_API_URL = 'https://funding.tools/api/funding-data/diff/historical_differences';
     private readonly PARADEX_API_URL = 'https://api.prod.paradex.trade/v1';
-    private readonly DUMMY_EXCHANGE_FOR_UNHEDGED = 'P'; // Используем Paradex как "мусорную" биржу
 
     private readonly exchangeMap: Record<string, string> = {
         'B': 'binance_usd-m', 'L': 'lighter', 'E': 'extended', 'H': 'hyperliquid', 'P': 'paradex',
@@ -26,14 +33,18 @@ export class TotalFundingsService {
     private async _cacheParadexMarketData(): Promise<void> {
         try {
             console.log('Caching Paradex market data...');
-            const response = await axios.get<IParadexMarketsResponse>(`${this.PARADEX_API_URL}/markets`);
+            const response = await axios.get<ParadexMarketsResponse>(`${this.PARADEX_API_URL}/markets`);
             this.paradexMarketDataCache.clear();
             for (const market of response.data.results) {
-                if (market.base_currency && market.funding_period_hours) {
+                if (
+                    market.asset_kind === 'PERP' &&
+                    market.base_currency &&
+                    market.funding_period_hours
+                ) {
                     this.paradexMarketDataCache.set(market.base_currency, market.funding_period_hours);
                 }
             }
-            console.log(`Cached data for ${this.paradexMarketDataCache.size} Paradex markets.`);
+            console.log(`Cached data for ${this.paradexMarketDataCache.size} Paradex perpetual markets.`);
         } catch (error) {
             console.error('Failed to cache Paradex market data:', error);
         }
@@ -41,21 +52,17 @@ export class TotalFundingsService {
 
     public async getHistoricalFunding(): Promise<IHistoricalFundingData> {
         const { hedgedPairs, unhedgedPositions } = await this.totalPositionsService.getAggregatedPositions();
-
         const needsParadexData = hedgedPairs.some(p => p.exchanges.includes('P')) ||
             unhedgedPositions.some(p => p.exchange === 'P');
         if (needsParadexData) {
             await this._cacheParadexMarketData();
         }
-
         const [hedgedResults, unhedgedResults] = await Promise.all([
             Promise.all(hedgedPairs.map(pair => this._fetchFundingForPair(pair))),
             Promise.all(unhedgedPositions.map(pos => this._fetchFundingForUnhedged(pos)))
         ]);
-
         hedgedResults.sort((a, b) => b.notional - a.notional);
         unhedgedResults.sort((a, b) => b.notional - a.notional);
-
         return { hedged: hedgedResults, unhedged: unhedgedResults };
     }
 
@@ -86,74 +93,92 @@ export class TotalFundingsService {
     private async _fetchSingleFundingDiff(item: HedgedPair | UnhedgedPosition, days: number): Promise<number> {
         try {
             const isHedged = 'exchanges' in item;
-            let longExchangeCode: string | null = null;
-            let shortExchangeCode: string | null = null;
-            let targetExchangeCode: string;
-
-            if (isHedged) {
-                [longExchangeCode, shortExchangeCode] = item.exchanges.split('-');
-                targetExchangeCode = longExchangeCode; // Неважно, для запроса нужны обе
-            } else {
-                targetExchangeCode = item.exchange;
-                if (item.side === 'LONG') longExchangeCode = item.exchange;
-                else shortExchangeCode = item.exchange;
-            }
-
-            const sectionNames = isHedged
-                ? [this.exchangeMap[longExchangeCode!], this.exchangeMap[shortExchangeCode!]]
-                // Для анхеджа добавляем "мусорную" биржу
-                : [this.exchangeMap[targetExchangeCode], this.exchangeMap[this.DUMMY_EXCHANGE_FOR_UNHEDGED]];
-
-            if (sectionNames.some(name => !name)) return 0;
-
             const toTs = getUnixTime(new Date());
             const fromTs = getUnixTime(subDays(new Date(), days));
-            const params = new URLSearchParams({
-                asset_names: item.coin, normalize_to_interval: 'raw',
-                from_ts: fromTs.toString(), to_ts: toTs.toString(), buffer: '30',
-            });
-            sectionNames.forEach(name => params.append('section_names', name));
-            params.append('quote_names', 'USD');
-            params.append('quote_names', 'USDT');
 
-            const response = await axios.get<IFundingToolsResponse>(this.FUNDING_TOOLS_API_URL, { params });
-            const fundingData = response.data?.data?.[0];
-            if (!fundingData?.contract_1_section || !fundingData?.contract_2_section) return 0;
+            let annualizedPercentage = 0;
 
-            let calculatedValue = 0;
-            const contracts = [
-                { section: fundingData.contract_1_section, funding: fundingData.contract_1_total_funding || 0 },
-                { section: fundingData.contract_2_section, funding: fundingData.contract_2_total_funding || 0 }
-            ];
+            if (isHedged) {
+                // --- ЛОГИКА ДЛЯ ХЕДЖИРОВАННЫХ ПАР ---
+                const [longExchangeCode, shortExchangeCode] = item.exchanges.split('-');
+                const sectionNames = [this.exchangeMap[longExchangeCode], this.exchangeMap[shortExchangeCode]];
+                if (sectionNames.some(name => !name)) return 0;
 
-            for (const contract of contracts) {
-                const code = this.reverseExchangeMap[contract.section];
-                let fundingValue = contract.funding;
+                const params = new URLSearchParams({
+                    asset_names: item.coin, normalize_to_interval: 'raw',
+                    from_ts: fromTs.toString(), to_ts: toTs.toString(), buffer: '30',
+                });
+                sectionNames.forEach(name => { if (name) params.append('section_names', name) });
+                params.append('quote_names', 'USD');
+                params.append('quote_names', 'USDT');
 
-                if (code === 'P') {
-                    const fundingPeriodHours = this.paradexMarketDataCache.get(item.coin);
-                    if (fundingPeriodHours && fundingPeriodHours > 0) {
-                        fundingValue = (fundingValue * 8) / fundingPeriodHours;
-                    } else {
-                        console.warn(`[Paradex Adjustment] Could not find funding_period_hours for coin: ${item.coin}`);
+                const response = await axios.get<IFundingToolsResponse>(this.FUNDING_TOOLS_API_URL, { params });
+                const fundingData = response.data?.data?.[0];
+                if (!fundingData?.contract_1_section || !fundingData?.contract_2_section) return 0;
+
+                let calculatedValue = 0;
+                const contracts = [
+                    { section: fundingData.contract_1_section, funding: fundingData.contract_1_total_funding || 0 },
+                    { section: fundingData.contract_2_section, funding: fundingData.contract_2_total_funding || 0 }
+                ];
+                for (const contract of contracts) {
+                    const code = this.reverseExchangeMap[contract.section];
+                    let fundingValue = contract.funding;
+                    if (code === 'P') {
+                        const fundingPeriodHours = this.paradexMarketDataCache.get(item.coin);
+                        if (fundingPeriodHours && fundingPeriodHours > 0) {
+                            fundingValue = (fundingValue * 8) / fundingPeriodHours;
+                        }
                     }
-                }
-
-                if (isHedged) {
                     if (code === shortExchangeCode) calculatedValue += fundingValue;
                     else if (code === longExchangeCode) calculatedValue -= fundingValue;
+                }
+                if (days > 0) {
+                    annualizedPercentage = (calculatedValue / days) * 365 * 100;
+                }
+            } else {
+                // --- ЛОГИКА ДЛЯ НЕХЕДЖИРОВАННЫХ ПАР ---
+                const targetSectionName = this.exchangeMap[item.exchange];
+                if (!targetSectionName) return 0;
+
+                const isParadex = item.exchange === 'P';
+
+                const params = new URLSearchParams({
+                    asset_names: item.coin,
+                    compare_for_section: targetSectionName,
+                    normalize_to_interval: isParadex ? '365d' : 'raw',
+                    from_ts: fromTs.toString(),
+                    to_ts: toTs.toString(),
+                    buffer_minutes: '30',
+                });
+
+                if (!isParadex) {
+                    params.append('quote_names', 'USD');
+                    params.append('quote_names', 'USDT');
+                }
+
+                const response = await axios.get<IFundingToolsResponse>(this.FUNDING_TOOLS_API_URL, { params });
+                const fundingData = response.data?.data?.[0];
+
+                const rawFunding = fundingData?.contract_1_total_funding || 0;
+
+                if (isParadex) {
+                    let correctedAnnualizedValue = rawFunding * 100;
+                    const fundingPeriodHours = this.paradexMarketDataCache.get(item.coin);
+                    if (fundingPeriodHours && fundingPeriodHours > 0) {
+                        annualizedPercentage = (correctedAnnualizedValue * 8) / fundingPeriodHours;
+                    } else {
+                        annualizedPercentage = correctedAnnualizedValue;
+                    }
                 } else {
-                    if (code === targetExchangeCode) {
-                        calculatedValue = fundingValue;
-                        break;
+                    if (days > 0) {
+
+                        annualizedPercentage = (rawFunding / days) * 365 * 100;
                     }
                 }
             }
 
-            if (days === 0) return 0;
-            const annualizedPercentage = (calculatedValue / days) * 365 * 100;
-
-            if (!isHedged && item.side === 'SHORT') {
+            if (!isHedged && item.side === 'LONG') {
                 return -annualizedPercentage;
             }
 

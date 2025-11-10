@@ -210,7 +210,7 @@ export class NotificationService {
         }
 
         // Устанавливаем безопасный интервал в 1 минуту (60 000 миллисекунд)
-        const intervalId = setInterval(() => this._performCheck(userId), 30000);
+        const intervalId = setInterval(() => this._performCheck(userId), 60000);
 
         this.activeMonitors.set(userId, intervalId);
         console.log(`Мониторинг запущен для пользователя: ${userId}`);
