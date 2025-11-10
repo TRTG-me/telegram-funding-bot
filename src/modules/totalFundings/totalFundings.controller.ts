@@ -17,7 +17,7 @@ export class TotalFundingsController {
         const headers = [
             'Coin'.padEnd(8),
             'Notional'.padEnd(12),
-            'Exchanges'.padEnd(8),
+            'Ex'.padEnd(8),
             '1D'.padEnd(8),
             '3D'.padEnd(8),
             '7D'.padEnd(8),
@@ -50,7 +50,7 @@ export class TotalFundingsController {
         const headers = [
             'Coin'.padEnd(8),
             'Notional'.padEnd(12),
-            'Exch'.padEnd(6),
+            'Ex'.padEnd(6),
             'Side'.padEnd(6),
             '1D'.padEnd(8),
             '3D'.padEnd(8),
