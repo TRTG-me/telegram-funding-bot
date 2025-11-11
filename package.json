@@ -20,13 +20,17 @@
   },
   "dependencies": {
     "@binance/connector": "^3.6.1",
+    "@binance/derivatives-trading-options": "^9.0.1",
     "@binance/derivatives-trading-portfolio-margin": "^6.0.0",
+    "@binance/derivatives-trading-usds-futures": "^15.0.1",
     "@nestjs/common": "^11.1.8",
+    "@types/ws": "^8.18.1",
     "axios": "^1.12.2",
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.3",
     "node-cron": "^4.2.1",
     "starknet": "^7.1.0",
-    "telegraf": "^4.16.3"
+    "telegraf": "^4.16.3",
+    "ws": "^8.18.3"
   }
 }
