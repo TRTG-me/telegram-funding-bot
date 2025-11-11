@@ -24,11 +24,26 @@ import { TotalPositionsService } from './modules/totalPositions/totalPositions.s
 import { TotalFundingsController } from './modules/totalFundings/totalFundings.controller';
 import { TotalFundingsService } from './modules/totalFundings/totalFundings.service';
 
+import { BinanceTickerService } from './modules/binance/websocket/binance.ticker.service';
+import { BinanceTickerController } from './modules/binance/websocket/binance.ticker.controller';
 
-// --- Клавиатура и управление состоянием ---
+import { HyperliquidTickerService } from './modules/hyperliquid/websocket/hyperliquid.ticker.service';
+import { HyperliquidTickerController } from './modules/hyperliquid/websocket/hyperliquid.ticker.controller';
+
+import { ParadexTickerService } from './modules/paradex/websocket/paradex.ticker.service';
+import { ParadexTickerController } from './modules/paradex/websocket/paradex.ticker.controller';
+
+import { ExtendedTickerService } from './modules/extended/websocket/extended.ticker.service';
+import { ExtendedTickerController } from './modules/extended/websocket/extended.ticker.controller';
+
+import { LighterTickerService } from './modules/lighter/websocket/lighter.ticker.service';
+import { LighterTickerController } from './modules/lighter/websocket/lighter.ticker.controller';
+
+// --- ИЗМЕНЕНИЕ 1: Добавляем новую строку с кнопками для тикера ---
 const mainMenuKeyboard = Markup.keyboard([
-    ['Плечи', 'Позиции', 'Фандинги'],
-    ['Включить Alert', 'Выключить Alert', '✏️Изменить ранги']
+    ['Плечи', 'Позиции', 'Фандинги', 'БП'],
+    ['Включить Alert', 'Выключить Alert', '✏️Изменить ранги'],
+    ['🚀 Запустить тикер', '🛑 Остановить тикер'] // <--- НОВАЯ СТРОКА
 ]).resize();
 
 const userState = new Map<number, string>();
@@ -41,6 +56,13 @@ async function start() {
     const lighterService = new LighterService();
     const extendedService = new ExtendedService();
     const rankingService = new RankingService();
+    const binanceTickerService = new BinanceTickerService();
+    const hyperliquidTickerService = new HyperliquidTickerService();
+    const paradexTickerService = new ParadexTickerService();
+    const extendedTickerService = new ExtendedTickerService();
+    const lighterTickerService = new LighterTickerService();
+
+
 
     // Сервисы-агрегаторы
     const summaryService = new SummaryService(
@@ -69,6 +91,11 @@ async function start() {
     const totalPositionsController = new TotalPositionsController(totalPositionsService);
     const notificationController = new NotificationController(notificationService);
     const totalFundingsController = new TotalFundingsController(totalFundingsService);
+    const binanceTickerController = new BinanceTickerController(binanceTickerService);
+    const hyperliquidTickerController = new HyperliquidTickerController(hyperliquidTickerService);
+    const paradexTickerController = new ParadexTickerController(paradexTickerService)
+    const extendedTickerController = new ExtendedTickerController(extendedTickerService);
+    const lighterTickerController = new LighterTickerController(lighterTickerService);
 
     // --- 3. Регистрация команды /start ---
     bot.start((ctx) => {
@@ -86,14 +113,18 @@ async function start() {
         const currentState = userState.get(userId);
         const text = ctx.message.text;
 
-        const mainMenuCommands = ['Плечи', 'Позиции', '✏️ Изменить ранги', 'Включить Alert', 'Выключить Alert', 'Фандинги'];
+        // --- ИЗМЕНЕНИЕ 2: Добавляем тексты новых кнопок в массив команд ---
+        const mainMenuCommands = [
+            'Плечи', 'Позиции', 'Фандинги',
+            'Включить Alert', 'Выключить Alert', '✏️ Изменить ранги',
+            '🚀 Запустить тикер', '🛑 Остановить тикер' // <--- НОВЫЕ КОМАНДЫ
+        ];
 
         // --- ЛОГИЧЕСКИЙ БЛОК 1: ПРИОРИТЕТНАЯ ОБРАБОТКА КОМАНД МЕНЮ ---
-        // Сначала проверяем, является ли сообщение командой из главного меню.
         if (mainMenuCommands.includes(text)) {
-            // Если это команда, мы ОБЯЗАТЕЛЬНО сбрасываем любое предыдущее состояние.
             userState.delete(userId);
 
+            // --- ИЗМЕНЕНИЕ 3: Добавляем обработку новых кнопок в switch ---
             switch (text) {
                 case 'Плечи':
                     return summaryController.sendSummaryTable(ctx);
@@ -108,15 +139,18 @@ async function start() {
                 case 'Фандинги':
                     return totalFundingsController.displayHistoricalFunding(ctx);
 
+                // --- НОВЫЕ ОБРАБОТЧИКИ ДЛЯ ТИКЕРА ---
+                case '🚀 Запустить тикер':
+                    return binanceTickerController.startTicker(ctx);
+                case '🛑 Остановить тикер':
+                    return binanceTickerController.stopTicker(ctx);
             }
         }
         // --- ЛОГИЧЕСКИЙ БЛОК 2: ОБРАБОТКА СОСТОЯНИЙ ---
-        // Этот блок выполнится, только если сообщение НЕ является командой из меню.
         else if (currentState === 'awaiting_ranks_json') {
             return rankingController.onRanksJsonReceived(ctx);
         }
         // --- ЛОГИЧЕСКИЙ БЛОК 3: НЕИЗВЕСТНАЯ КОМАНДА ---
-        // Этот блок выполнится, только если сообщение не является ни командой, ни вводом для состояния.
         else {
             ctx.reply('Неизвестная команда. Пожалуйста, используйте кнопки внизу.', mainMenuKeyboard);
         }
@@ -127,24 +161,13 @@ async function start() {
     console.log('Бот успешно запущен со всеми модулями!');
     const gracefulShutdown = (signal: string) => {
         console.log(`\n[Graceful Shutdown] Получен сигнал ${signal}. Начинаем завершение работы...`);
-
-        // 1. Останавливаем все активные таймеры мониторинга
         notificationService.stopAllMonitors();
-
-        // 2. Останавливаем сам бот (он перестает получать новые сообщения)
         bot.stop(signal);
-
         console.log('[Graceful Shutdown] Бот остановлен. Процесс завершается.');
-
-        // 3. Завершаем процесс Node.js
         process.exit(0);
     };
 
-    // Слушаем системные сигналы на завершение
-    // SIGINT - это сигнал, который отправляется при нажатии Ctrl+C
     process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-    // SIGTERM - это стандартный сигнал для "вежливого" завершения процесса
     process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 }
 
