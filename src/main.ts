@@ -39,9 +39,12 @@ import { ExtendedTickerController } from './modules/extended/websocket/extended.
 import { LighterTickerService } from './modules/lighter/websocket/lighter.ticker.service';
 import { LighterTickerController } from './modules/lighter/websocket/lighter.ticker.controller';
 
+import { BpService } from './modules/bp/bp.service';
+import { BpController } from './modules/bp/bp.controller';
+
 // --- ИЗМЕНЕНИЕ 1: Добавляем новую строку с кнопками для тикера ---
 const mainMenuKeyboard = Markup.keyboard([
-    ['Плечи', 'Позиции', 'Фандинги', 'БП'],
+    ['Плечи', 'Позиции', 'Фандинги', 'bp'],
     ['Включить Alert', 'Выключить Alert', '✏️Изменить ранги'],
     ['🚀 Запустить тикер', '🛑 Остановить тикер'] // <--- НОВАЯ СТРОКА
 ]).resize();
@@ -61,7 +64,13 @@ async function start() {
     const paradexTickerService = new ParadexTickerService();
     const extendedTickerService = new ExtendedTickerService();
     const lighterTickerService = new LighterTickerService();
-
+    const bpService = new BpService(
+        binanceTickerService,
+        hyperliquidTickerService,
+        paradexTickerService,
+        extendedTickerService,
+        lighterTickerService
+    );
 
 
     // Сервисы-агрегаторы
@@ -96,6 +105,7 @@ async function start() {
     const paradexTickerController = new ParadexTickerController(paradexTickerService)
     const extendedTickerController = new ExtendedTickerController(extendedTickerService);
     const lighterTickerController = new LighterTickerController(lighterTickerService);
+    const bpController = new BpController(bpService);
 
     // --- 3. Регистрация команды /start ---
     bot.start((ctx) => {
@@ -105,10 +115,17 @@ async function start() {
         ctx.reply('Привет! Используйте меню внизу.', mainMenuKeyboard);
     });
 
-    // --- 4. Главный обработчик текстовых сообщений (ИСПРАВЛЕННАЯ ЛОГИКА) ---
+
+    bot.on('callback_query', (ctx) => {
+        bpController.handleCallbackQuery(ctx);
+    });
     bot.on(message('text'), (ctx) => {
         const userId = ctx.from?.id;
         if (!userId) return;
+
+        if (bpController.isUserInBpFlow(userId)) {
+            return bpController.handleCoinInput(ctx);
+        }
 
         const currentState = userState.get(userId);
         const text = ctx.message.text;
@@ -117,7 +134,7 @@ async function start() {
         const mainMenuCommands = [
             'Плечи', 'Позиции', 'Фандинги',
             'Включить Alert', 'Выключить Alert', '✏️ Изменить ранги',
-            '🚀 Запустить тикер', '🛑 Остановить тикер' // <--- НОВЫЕ КОМАНДЫ
+            '🚀 Запустить тикер', '🛑 Остановить тикер', 'bp' // <--- НОВЫЕ КОМАНДЫ
         ];
 
         // --- ЛОГИЧЕСКИЙ БЛОК 1: ПРИОРИТЕТНАЯ ОБРАБОТКА КОМАНД МЕНЮ ---
@@ -144,6 +161,8 @@ async function start() {
                     return binanceTickerController.startTicker(ctx);
                 case '🛑 Остановить тикер':
                     return binanceTickerController.stopTicker(ctx);
+                case 'bp':
+                    return bpController.handleBpCommand(ctx);
             }
         }
         // --- ЛОГИЧЕСКИЙ БЛОК 2: ОБРАБОТКА СОСТОЯНИЙ ---
