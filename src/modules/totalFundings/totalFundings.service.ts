@@ -41,7 +41,7 @@ export class TotalFundingsService {
 
     private async _cacheParadexMarketData(): Promise<void> {
         try {
-            console.log('Caching Paradex market data...');
+
             const response = await axios.get<ParadexMarketsResponse>(`${this.PARADEX_API_URL}/markets`);
             this.paradexMarketDataCache.clear();
             for (const market of response.data.results) {
@@ -49,7 +49,7 @@ export class TotalFundingsService {
                     this.paradexMarketDataCache.set(market.base_currency, market.funding_period_hours);
                 }
             }
-            console.log(`Cached data for ${this.paradexMarketDataCache.size} Paradex perpetual markets.`);
+
         } catch (error) {
             console.error('Failed to cache Paradex market data:', error);
         }
@@ -103,17 +103,16 @@ export class TotalFundingsService {
             let annualizedPercentage = 0;
 
             if (isHedged && item.coin === 'KBONK') {
-                console.log(`\n--- [DEBUG] KBONK Funding Calculation (${days}d) ---`);
+
                 const [longExchangeCode, shortExchangeCode] = item.exchanges.split('-');
                 const longFunding = await this._fetchIndividualFundingForKbonk(longExchangeCode, item.coin, fromTs, toTs);
                 const shortFunding = await this._fetchIndividualFundingForKbonk(shortExchangeCode, item.coin, fromTs, toTs);
                 const calculatedValue = shortFunding - longFunding;
-                console.log(`  Difference (Short - Long): ${calculatedValue.toFixed(6)}`);
+
                 if (days > 0) {
                     annualizedPercentage = (calculatedValue / days) * 365 * 100;
                 }
-                console.log(`  Final Annualized Percentage for Table: ${annualizedPercentage.toFixed(4)}%`);
-                console.log(`--- [DEBUG END] ---`);
+
                 return annualizedPercentage;
             }
 
@@ -216,12 +215,12 @@ export class TotalFundingsService {
         params.append('quote_names', 'USD');
         params.append('quote_names', 'USDT');
 
-        console.log(`  [${targetExchangeCode}] Requesting with partner ${partnerExchangeCode}...`);
+
 
         const response = await axios.get<IFundingToolsResponse>(this.FUNDING_TOOLS_API_URL, { params });
         const fundingData = response.data?.data?.[0];
         if (!fundingData) {
-            console.log(`  [${targetExchangeCode}] NO DATA RECEIVED from funding.tools API.`);
+
             return 0;
         }
 
@@ -232,14 +231,14 @@ export class TotalFundingsService {
             rawFunding = fundingData.contract_2_total_funding || 0;
         }
 
-        console.log(`  [${targetExchangeCode}] Raw funding from API: ${rawFunding.toFixed(6)}`);
+
 
         if (targetExchangeCode === 'P') {
             const fundingPeriodHours = this.paradexMarketDataCache.get(assetNameForApi);
-            console.log(`  [${targetExchangeCode}] Funding Period: ${fundingPeriodHours || 'N/A'} hours`);
+
             if (fundingPeriodHours && fundingPeriodHours > 0) {
                 const correctedFunding = (rawFunding * 8) / fundingPeriodHours;
-                console.log(`  [${targetExchangeCode}] Corrected Funding (adjusted to 8h): ${correctedFunding.toFixed(6)}`);
+
                 return correctedFunding;
             }
         }
