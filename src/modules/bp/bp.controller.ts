@@ -1,6 +1,7 @@
 import { Context, Markup } from 'telegraf';
 import { Update } from 'telegraf/typings/core/types/typegram';
-import { BpService, ExchangeName } from './bp.service';
+// --- ИЗМЕНЕНИЕ 1: Импортируем новый интерфейс BpCalculationData ---
+import { BpService, ExchangeName, BpCalculationData } from './bp.service';
 
 interface BpState {
     step: 'awaiting_coin' | 'awaiting_long' | 'awaiting_short' | 'calculating';
@@ -44,11 +45,10 @@ export class BpController {
         const state = this.userState.get(userId);
         const coin = ctx.message.text.trim();
 
-        // --- ВАЛИДАЦИЯ ВВОДА ---
-        const coinRegex = /^[a-zA-Z]{1,8}$/; // Английские буквы, от 1 до 8 символов
+        const coinRegex = /^[a-zA-Z]{1,8}$/;
         if (!coinRegex.test(coin)) {
             await ctx.reply('Неверный формат. Введите символ монеты, используя только английские буквы (от 1 до 8 символов).');
-            return; // Прерываем, оставляя пользователя на том же шаге
+            return;
         }
 
         const upperCoin = coin.toUpperCase();
@@ -104,16 +104,24 @@ export class BpController {
         const state = this.userState.get(userId);
         if (!state || !state.coin || !state.longExchange || !state.shortExchange || !state.messageId) return;
 
-        const onUpdate = async (bpValue: number | null) => {
+        // --- ИЗМЕНЕНИЕ 2: onUpdate теперь принимает объект 'data' ---
+        const onUpdate = async (data: BpCalculationData | null) => {
             const currentState = this.userState.get(userId);
             if (!currentState || currentState.step !== 'calculating') return;
 
             const now = Date.now();
             if (currentState.lastUpdateTime && now - currentState.lastUpdateTime < 500) return;
 
-            const text = bpValue === null
-                ? `*${currentState.coin} \\(${currentState.longExchange} / ${currentState.shortExchange}\\)*\n\n_Ожидание данных\\.\\.\\._`
-                : `*${currentState.coin} \\(${currentState.longExchange} / ${currentState.shortExchange}\\)*\n\nbp: \`${bpValue.toFixed(1)}\``;
+            let text: string;
+            // --- ИЗМЕНЕНИЕ 3: Новая логика форматирования сообщения ---
+            if (data === null) {
+                text = `*${currentState.coin} BP \\(${currentState.longExchange} / ${currentState.shortExchange}\\)*\n\n_Ожидание данных\\.\\.\\._`;
+            } else {
+                text = `*${currentState.coin} BP \\(${currentState.longExchange} / ${currentState.shortExchange}\\)*\n\n` +
+                    `Long Price \\(ask\\): \`${data.longPrice.toFixed(6)}\`\n` +
+                    `Short Price \\(bid\\): \`${data.shortPrice.toFixed(6)}\`\n` +
+                    `BP: \`${data.bpValue.toFixed(1)}\``;
+            }
 
             if (text === currentState.lastMessageText) return;
 
@@ -130,19 +138,18 @@ export class BpController {
         };
 
         try {
-            // --- ОБРАБОТКА ОШИБОК ОТ СЕРВИСА ---
             await this.bpService.start(state.coin, state.longExchange, state.shortExchange, onUpdate);
         } catch (error) {
-            // Если bpService выбросил ошибку (не удалось подключиться или найти монету)
             console.error(`Error caught in controller: ${(error as Error).message}`);
+            const errorMessage = (error as Error).message;
+            const escapedErrorMessage = errorMessage.replace(/([-_\[\]()~`>#\+\=\|{}\.!\\])/g, '\\$1');
             await ctx.telegram.editMessageText(
                 userId,
                 state.messageId,
                 undefined,
-                `❌ *Ошибка подключения* \n\nВероятно, монета *${state.coin}* не найдена на одной из бирж, или произошла другая ошибка\\. Расчет остановлен\\.`,
+                `❌ *Ошибка*\n\nПричина: *${escapedErrorMessage}*\n\nВозможно, монета *${state.coin}* не поддерживается на этой бирже\\. Расчет остановлен\\.`,
                 { parse_mode: 'MarkdownV2' }
             );
-            // Очищаем состояние пользователя, завершая диалог
             this.userState.delete(userId);
         }
     }

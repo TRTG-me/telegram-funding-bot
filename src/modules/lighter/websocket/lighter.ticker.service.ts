@@ -15,18 +15,14 @@ type PriceUpdateCallback = (bid: string, ask: string) => void;
 
 export class LighterTickerService {
     private ws: WebSocket | null = null;
+    // Хранилище состояний ордербуков для каждого рынка
     private orderBookStates = new Map<string, OrderBook>();
 
     constructor() {
         console.log('LighterTickerService initialized.');
     }
 
-    /**
-     * Запускает WebSocket-поток и возвращает Promise, который
-     * разрешается при успехе или отклоняется при ошибке.
-     */
     public start(marketIndex: string, callback: PriceUpdateCallback): Promise<void> {
-        // --- ГЛАВНОЕ ИЗМЕНЕНИЕ: Оборачиваем всю логику в Promise ---
         return new Promise((resolve, reject) => {
             if (this.ws) {
                 console.warn('Lighter WebSocket connection is already active.');
@@ -35,7 +31,14 @@ export class LighterTickerService {
             }
 
             const connectionUrl = 'wss://mainnet.zklighter.elliot.ai/stream';
-            this.ws = new WebSocket(connectionUrl);
+            const options = {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36',
+                    'Origin': 'https://mainnet.zklighter.elliot.ai'
+                }
+            };
+
+            this.ws = new WebSocket(connectionUrl, options);
             const currentConnection = this.ws;
 
             currentConnection.on('open', () => {
@@ -50,7 +53,6 @@ export class LighterTickerService {
             currentConnection.on('error', (error) => {
                 console.error('Lighter WebSocket error:', error);
                 this.ws = null;
-                // --- СООБЩАЕМ О ПРОВАЛЕ ---
                 reject(error);
             });
 
@@ -58,7 +60,6 @@ export class LighterTickerService {
                 console.log(`Lighter WebSocket disconnected: ${code} - ${reason.toString()}`);
                 this.orderBookStates.delete(marketIndex);
                 if (code !== 1000) {
-                    // --- СООБЩАЕМ О ПРОВАЛЕ ---
                     reject(new Error(`Lighter disconnected unexpectedly: ${code}`));
                 }
                 this.ws = null;
@@ -73,20 +74,23 @@ export class LighterTickerService {
                         case 'ping':
                             currentConnection.send(JSON.stringify({ type: 'pong' }));
                             break;
+
                         case 'subscribed/order_book':
+                            // Это наш первоначальный снимок (snapshot), сохраняем его
                             console.log(`Received order book snapshot for market ${marketIndex}. Subscription successful.`);
                             this.orderBookStates.set(marketIndex, message.order_book);
-                            // --- СООБЩАЕМ ОБ УСПЕХЕ ---
-                            // Promise разрешается только после получения первого снимка.
-                            resolve();
+                            resolve(); // Сообщаем об успехе только после получения снимка
                             break;
+
                         case 'update/order_book':
+                            // Это дельта (изменение), применяем ее к нашему состоянию
                             this.handleOrderBookUpdate(marketIndex, message.order_book);
                             break;
                     }
 
                     const currentState = this.orderBookStates.get(marketIndex);
                     if (currentState && currentState.bids.length > 0 && currentState.asks.length > 0) {
+                        // Отправляем лучшие цены из ОБНОВЛЕННОГО И ОТСОРТИРОВАННОГО стакана
                         callback(currentState.bids[0].price, currentState.asks[0].price);
                     }
                 } catch (error) {
@@ -96,25 +100,37 @@ export class LighterTickerService {
         });
     }
 
+    // --- ВОЗВРАЩАЕМ ЛОГИКУ ОБРАБОТКИ ДЕЛЬТ ---
     private handleOrderBookUpdate(marketIndex: string, delta: OrderBook): void {
         const currentState = this.orderBookStates.get(marketIndex);
-        if (!currentState) return;
+        if (!currentState) {
+            console.error(`Received update for market ${marketIndex}, but no initial state exists.`);
+            return;
+        }
+
+        // Применяем изменения к asks и bids
         this.updateSide(currentState.asks, delta.asks);
         this.updateSide(currentState.bids, delta.bids);
-        currentState.asks.sort((a, b) => parseFloat(a.price) - parseFloat(b.price));
-        currentState.bids.sort((a, b) => parseFloat(b.price) - parseFloat(a.price));
+
+        // **КРИТИЧЕСКИ ВАЖНЫЙ ШАГ**: Пересортировываем стакан после каждого обновления
+        currentState.asks.sort((a, b) => parseFloat(a.price) - parseFloat(b.price)); // Аски по возрастанию
+        currentState.bids.sort((a, b) => parseFloat(b.price) - parseFloat(a.price)); // Биды по убыванию
     }
 
     private updateSide(existingLevels: OrderLevel[], newLevels: OrderLevel[]): void {
         for (const newLevel of newLevels) {
             const index = existingLevels.findIndex(level => level.price === newLevel.price);
+
             if (index !== -1) {
+                // Уровень цен уже существует, обновляем его
                 if (parseFloat(newLevel.size) > 0) {
                     existingLevels[index].size = newLevel.size;
                 } else {
+                    // Если размер 0, удаляем этот уровень цен
                     existingLevels.splice(index, 1);
                 }
             } else if (parseFloat(newLevel.size) > 0) {
+                // Это новый уровень цен, добавляем его
                 existingLevels.push(newLevel);
             }
         }
@@ -125,8 +141,6 @@ export class LighterTickerService {
             console.log('Disconnecting from Lighter WebSocket...');
             this.ws.close(1000, 'Client initiated stop');
             this.ws = null;
-        } else {
-            // console.warn('Attempted to stop a non-existent Lighter WebSocket connection.');
         }
     }
 }

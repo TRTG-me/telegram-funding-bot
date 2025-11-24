@@ -6,9 +6,15 @@ import { ExtendedTickerService } from '../extended/websocket/extended.ticker.ser
 import { LighterTickerService } from '../lighter/websocket/lighter.ticker.service';
 
 export type ExchangeName = 'Binance' | 'Hyperliquid' | 'Paradex' | 'Extended' | 'Lighter';
-type PriceUpdateCallback = (bpValue: number | null) => void;
 
-// Определяем общий тип для всех наших тикер-сервисов
+// Интерфейс для структурированной передачи данных в контроллер
+export interface BpCalculationData {
+    longPrice: number;
+    shortPrice: number;
+    bpValue: number;
+}
+type PriceUpdateCallback = (data: BpCalculationData | null) => void;
+
 type TickerService =
     | BinanceTickerService
     | HyperliquidTickerService
@@ -20,8 +26,6 @@ export class BpService {
     private latestLongAsk: number | null = null;
     private latestShortBid: number | null = null;
     private calculationInterval: NodeJS.Timeout | null = null;
-
-    // Храним ссылки на активные в данный момент сервисы
     private activeLongService: TickerService | null = null;
     private activeShortService: TickerService | null = null;
 
@@ -44,18 +48,30 @@ export class BpService {
     }
 
     private async formatSymbolFor(exchange: ExchangeName, coin: string): Promise<string> {
-        const upperCoin = coin.toUpperCase();
+        let finalCoinSymbol: string;
+        const lowerCoin = coin.toLowerCase();
+
+        if (lowerCoin === 'kbonk') {
+            if (exchange === 'Binance' || exchange === 'Lighter') {
+                finalCoinSymbol = '1000BONK';
+            } else {
+                finalCoinSymbol = 'kBONK';
+            }
+        } else {
+            finalCoinSymbol = coin.toUpperCase();
+        }
+
         switch (exchange) {
-            case 'Binance': return `${upperCoin}USDT`;
-            case 'Extended': return `${upperCoin}-USD`;
-            case 'Paradex': return `${upperCoin}-USD-PERP`;
-            case 'Hyperliquid': return upperCoin;
+            case 'Binance': return `${finalCoinSymbol}USDT`;
+            case 'Extended': return `${finalCoinSymbol}-USD`;
+            case 'Paradex': return `${finalCoinSymbol}-USD-PERP`;
+            case 'Hyperliquid': return finalCoinSymbol;
             case 'Lighter':
                 try {
                     const response = await axios.get('https://mainnet.zklighter.elliot.ai/api/v1/orderBooks');
-                    const market = response.data.order_books.find((book: any) => book.symbol === upperCoin);
+                    const market = response.data.order_books.find((book: any) => book.symbol === finalCoinSymbol);
                     if (market) return market.market_id.toString();
-                    throw new Error(`Market ${upperCoin} not found on Lighter.`);
+                    throw new Error(`Market ${finalCoinSymbol} not found on Lighter.`);
                 } catch (error) {
                     console.error('Failed to get Lighter market_id:', error);
                     throw error;
@@ -69,7 +85,7 @@ export class BpService {
         shortExchange: ExchangeName,
         callback: PriceUpdateCallback
     ): Promise<void> {
-        this.stop(); // Гарантируем чистый старт
+        this.stop();
 
         try {
             const longSymbol = await this.formatSymbolFor(longExchange, coin);
@@ -79,19 +95,26 @@ export class BpService {
             this.activeShortService = this.getServiceFor(shortExchange);
 
             console.log('Attempting to start both WebSocket connections...');
-            // Запускаем оба подключения параллельно и ждем, пока ОБА не завершатся успешно.
-            // Если хотя бы один выдаст ошибку, Promise.all немедленно прервется и перейдет в catch.
-            await Promise.all([
-                this.activeLongService.start(longSymbol, (_, ask: string) => { this.latestLongAsk = parseFloat(ask); }),
-                this.activeShortService.start(shortSymbol, (bid: string, _) => { this.latestShortBid = parseFloat(bid); })
-            ]);
+
+            const longPromise = this.activeLongService.start(longSymbol, (_, ask: string) => { this.latestLongAsk = parseFloat(ask); })
+                .catch((error: Error) => { throw new Error(`[Биржа ${longExchange}] ${error.message}`); });
+
+            const shortPromise = this.activeShortService.start(shortSymbol, (bid: string, _) => { this.latestShortBid = parseFloat(bid); })
+                .catch((error: Error) => { throw new Error(`[Биржа ${shortExchange}] ${error.message}`); });
+
+            await Promise.all([longPromise, shortPromise]);
+
             console.log('Both WebSocket connections established successfully.');
 
-            // Запускаем цикл расчетов только после успешного подключения
             this.calculationInterval = setInterval(() => {
                 if (this.latestLongAsk !== null && this.latestShortBid !== null) {
                     const bp = ((this.latestShortBid - this.latestLongAsk) / this.latestShortBid) * 10000;
-                    callback(bp);
+                    const data: BpCalculationData = {
+                        longPrice: this.latestLongAsk,
+                        shortPrice: this.latestShortBid,
+                        bpValue: bp
+                    };
+                    callback(data);
                 } else {
                     callback(null);
                 }
@@ -99,9 +122,7 @@ export class BpService {
 
         } catch (error) {
             console.error('Failed to start BP calculation due to a connection error:', error);
-            // Если что-то пошло не так, останавливаем все, что могло запуститься
             this.stop();
-            // Пробрасываем ошибку выше, чтобы контроллер мог ее поймать и уведомить пользователя
             throw error;
         }
     }
@@ -112,11 +133,9 @@ export class BpService {
             this.calculationInterval = null;
         }
 
-        // Останавливаем только те сервисы, которые были активны
         if (this.activeLongService) this.activeLongService.stop();
         if (this.activeShortService) this.activeShortService.stop();
 
-        // Сбрасываем состояние
         this.activeLongService = null;
         this.activeShortService = null;
         this.latestLongAsk = null;

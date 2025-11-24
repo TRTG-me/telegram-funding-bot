@@ -2,16 +2,14 @@ import { Injectable } from '@nestjs/common';
 import axios from 'axios';
 import { getUnixTime, subDays } from 'date-fns';
 import { TotalPositionsService, HedgedPair, UnhedgedPosition } from '../totalPositions/totalPositions.service';
-import { IFundingResultRow, IHistoricalFundingData, IUnhedgedFundingResultRow, IFundingToolsResponse, IParadexMarketsResponse } from '../../common/interfaces';
+import { IFundingResultRow, IUnhedgedFundingResultRow, IFundingToolsResponse, IHistoricalFundingData } from '../../common/interfaces';
 
-// --- Добавляем локальные интерфейсы, если они не в общем файле ---
 interface ParadexMarket {
     base_currency?: string;
     funding_period_hours?: number;
     asset_kind?: string;
 }
 interface ParadexMarketsResponse { results: ParadexMarket[]; }
-
 
 @Injectable()
 export class TotalFundingsService {
@@ -30,17 +28,24 @@ export class TotalFundingsService {
         );
     }
 
+    private _translateCoinForApi(coin: string, exchangeCode: string): string {
+        const lowerCoin = coin.toLowerCase();
+        if (lowerCoin === 'kbonk') {
+            if (exchangeCode === 'B' || exchangeCode === 'L') {
+                return '1000BONK';
+            }
+            return 'kBONK';
+        }
+        return coin;
+    }
+
     private async _cacheParadexMarketData(): Promise<void> {
         try {
             console.log('Caching Paradex market data...');
             const response = await axios.get<ParadexMarketsResponse>(`${this.PARADEX_API_URL}/markets`);
             this.paradexMarketDataCache.clear();
             for (const market of response.data.results) {
-                if (
-                    market.asset_kind === 'PERP' &&
-                    market.base_currency &&
-                    market.funding_period_hours
-                ) {
+                if (market.asset_kind === 'PERP' && market.base_currency && market.funding_period_hours) {
                     this.paradexMarketDataCache.set(market.base_currency, market.funding_period_hours);
                 }
             }
@@ -95,27 +100,38 @@ export class TotalFundingsService {
             const isHedged = 'exchanges' in item;
             const toTs = getUnixTime(new Date());
             const fromTs = getUnixTime(subDays(new Date(), days));
-
             let annualizedPercentage = 0;
 
-            if (isHedged) {
-                // --- ЛОГИКА ДЛЯ ХЕДЖИРОВАННЫХ ПАР ---
+            if (isHedged && item.coin === 'KBONK') {
+                console.log(`\n--- [DEBUG] KBONK Funding Calculation (${days}d) ---`);
                 const [longExchangeCode, shortExchangeCode] = item.exchanges.split('-');
+                const longFunding = await this._fetchIndividualFundingForKbonk(longExchangeCode, item.coin, fromTs, toTs);
+                const shortFunding = await this._fetchIndividualFundingForKbonk(shortExchangeCode, item.coin, fromTs, toTs);
+                const calculatedValue = shortFunding - longFunding;
+                console.log(`  Difference (Short - Long): ${calculatedValue.toFixed(6)}`);
+                if (days > 0) {
+                    annualizedPercentage = (calculatedValue / days) * 365 * 100;
+                }
+                console.log(`  Final Annualized Percentage for Table: ${annualizedPercentage.toFixed(4)}%`);
+                console.log(`--- [DEBUG END] ---`);
+                return annualizedPercentage;
+            }
+
+            if (isHedged) {
+                const [longExchangeCode, shortExchangeCode] = item.exchanges.split('-');
+                const coinForApi = this._translateCoinForApi(item.coin, longExchangeCode);
                 const sectionNames = [this.exchangeMap[longExchangeCode], this.exchangeMap[shortExchangeCode]];
                 if (sectionNames.some(name => !name)) return 0;
-
                 const params = new URLSearchParams({
-                    asset_names: item.coin, normalize_to_interval: 'raw',
+                    asset_names: coinForApi, normalize_to_interval: 'raw',
                     from_ts: fromTs.toString(), to_ts: toTs.toString(), buffer: '30',
                 });
-                sectionNames.forEach(name => { if (name) params.append('section_names', name) });
+                sectionNames.forEach(name => { if (name) params.append('section_names', name); });
                 params.append('quote_names', 'USD');
                 params.append('quote_names', 'USDT');
-
                 const response = await axios.get<IFundingToolsResponse>(this.FUNDING_TOOLS_API_URL, { params });
                 const fundingData = response.data?.data?.[0];
                 if (!fundingData?.contract_1_section || !fundingData?.contract_2_section) return 0;
-
                 let calculatedValue = 0;
                 const contracts = [
                     { section: fundingData.contract_1_section, funding: fundingData.contract_1_total_funding || 0 },
@@ -137,31 +153,23 @@ export class TotalFundingsService {
                     annualizedPercentage = (calculatedValue / days) * 365 * 100;
                 }
             } else {
-                // --- ЛОГИКА ДЛЯ НЕХЕДЖИРОВАННЫХ ПАР ---
+                const coinForApi = this._translateCoinForApi(item.coin, item.exchange);
                 const targetSectionName = this.exchangeMap[item.exchange];
                 if (!targetSectionName) return 0;
-
                 const isParadex = item.exchange === 'P';
-
                 const params = new URLSearchParams({
-                    asset_names: item.coin,
-                    compare_for_section: targetSectionName,
+                    asset_names: coinForApi, compare_for_section: targetSectionName,
                     normalize_to_interval: isParadex ? '365d' : 'raw',
-                    from_ts: fromTs.toString(),
-                    to_ts: toTs.toString(),
+                    from_ts: fromTs.toString(), to_ts: toTs.toString(),
                     buffer_minutes: '30',
                 });
-
                 if (!isParadex) {
                     params.append('quote_names', 'USD');
                     params.append('quote_names', 'USDT');
                 }
-
                 const response = await axios.get<IFundingToolsResponse>(this.FUNDING_TOOLS_API_URL, { params });
                 const fundingData = response.data?.data?.[0];
-
                 const rawFunding = fundingData?.contract_1_total_funding || 0;
-
                 if (isParadex) {
                     let correctedAnnualizedValue = rawFunding * 100;
                     const fundingPeriodHours = this.paradexMarketDataCache.get(item.coin);
@@ -172,7 +180,6 @@ export class TotalFundingsService {
                     }
                 } else {
                     if (days > 0) {
-
                         annualizedPercentage = (rawFunding / days) * 365 * 100;
                     }
                 }
@@ -181,12 +188,62 @@ export class TotalFundingsService {
             if (!isHedged && item.side === 'LONG') {
                 return -annualizedPercentage;
             }
-
             return annualizedPercentage;
-
         } catch (error) {
             console.error(`Failed to fetch funding for ${item.coin} for ${days} days:`, error);
             return 0;
         }
+    }
+
+    private async _fetchIndividualFundingForKbonk(targetExchangeCode: string, coin: string, fromTs: number, toTs: number): Promise<number> {
+        let partnerExchangeCode: string;
+        let assetNameForApi: string;
+        if (targetExchangeCode === 'B' || targetExchangeCode === 'L') {
+            assetNameForApi = '1000BONK';
+            partnerExchangeCode = targetExchangeCode === 'B' ? 'L' : 'B';
+        } else {
+            assetNameForApi = 'kBONK';
+            partnerExchangeCode = targetExchangeCode === 'P' ? 'H' : 'P';
+        }
+        const targetSection = this.exchangeMap[targetExchangeCode];
+        const partnerSection = this.exchangeMap[partnerExchangeCode];
+        const params = new URLSearchParams({
+            asset_names: assetNameForApi, normalize_to_interval: 'raw',
+            from_ts: fromTs.toString(), to_ts: toTs.toString(), buffer: '30',
+        });
+        params.append('section_names', targetSection);
+        params.append('section_names', partnerSection);
+        params.append('quote_names', 'USD');
+        params.append('quote_names', 'USDT');
+
+        console.log(`  [${targetExchangeCode}] Requesting with partner ${partnerExchangeCode}...`);
+
+        const response = await axios.get<IFundingToolsResponse>(this.FUNDING_TOOLS_API_URL, { params });
+        const fundingData = response.data?.data?.[0];
+        if (!fundingData) {
+            console.log(`  [${targetExchangeCode}] NO DATA RECEIVED from funding.tools API.`);
+            return 0;
+        }
+
+        let rawFunding = 0;
+        if (fundingData.contract_1_section === targetSection) {
+            rawFunding = fundingData.contract_1_total_funding || 0;
+        } else if (fundingData.contract_2_section === targetSection) {
+            rawFunding = fundingData.contract_2_total_funding || 0;
+        }
+
+        console.log(`  [${targetExchangeCode}] Raw funding from API: ${rawFunding.toFixed(6)}`);
+
+        if (targetExchangeCode === 'P') {
+            const fundingPeriodHours = this.paradexMarketDataCache.get(assetNameForApi);
+            console.log(`  [${targetExchangeCode}] Funding Period: ${fundingPeriodHours || 'N/A'} hours`);
+            if (fundingPeriodHours && fundingPeriodHours > 0) {
+                const correctedFunding = (rawFunding * 8) / fundingPeriodHours;
+                console.log(`  [${targetExchangeCode}] Corrected Funding (adjusted to 8h): ${correctedFunding.toFixed(6)}`);
+                return correctedFunding;
+            }
+        }
+
+        return rawFunding;
     }
 }
