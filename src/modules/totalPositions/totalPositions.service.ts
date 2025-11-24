@@ -12,8 +12,8 @@ export interface HedgedPair {
     notional: number;
     size: number;
     exchanges: string;
-    funding1: number; // Funding для LONG позиции
-    funding2: number; // Funding для SHORT позиции
+    funding1: number;
+    funding2: number;
     fundingDiff: number;
 }
 export interface UnhedgedPosition {
@@ -47,18 +47,40 @@ export class TotalPositionsService {
     private async _fetchAllPositions(): Promise<IDetailedPosition[]> {
         const services = [this.binanceService, this.hyperliquidService, this.paradexService, this.lighterService, this.extendedService];
         const results = await Promise.allSettled(services.map(service => service.getDetailedPositions()));
+
         const allPositions: IDetailedPosition[] = [];
+
         results.forEach((result, index) => {
             if (result.status === 'fulfilled') {
-                allPositions.push(...result.value);
+                // --- ГЛАВНОЕ ИЗМЕНЕНИЕ: Нормализация названий монет ---
+                // Мы преобразуем все позиции, "на лету" заменяя 'kBONK' на '1000BONK'
+                const normalizedPositions = result.value.map(position => {
+                    // Создаем копию, чтобы не изменять оригинальные данные (хорошая практика)
+                    const newPosition = { ...position };
+
+                    const upperCoin = newPosition.coin.toUpperCase();
+                    if (upperCoin === '1000BONK' || upperCoin === 'KBONK') {
+                        if (newPosition.coin !== 'KBONK') { // Логируем только если есть изменения
+                            console.log(`Normalizing position for ${newPosition.coin} from ${newPosition.exchange} to KBONK.`);
+                        }
+                        newPosition.coin = 'KBONK'; // Целевое имя
+                    }
+                    return newPosition;
+                });
+
+                // Добавляем в общий массив уже нормализованные позиции
+                allPositions.push(...normalizedPositions);
+
             } else {
                 console.error(`Failed to fetch positions from ${services[index].constructor.name}:`, result.reason);
             }
         });
+
         return allPositions;
     }
 
     private _findAndPairPositions(positions: IDetailedPosition[]): AggregatedPositions {
+        // ... остальная часть этого метода остается БЕЗ ИЗМЕНЕНИЙ ...
         const hedgedPairs: HedgedPair[] = [];
         const TOLERANCE = 1e-9;
         const formatFunding = (rate: number): number => parseFloat(rate.toFixed(4));
@@ -95,9 +117,7 @@ export class TotalPositionsService {
                         coin: longPos.coin,
                         size: parseFloat(matchSize.toFixed(3)),
                         notional: parseFloat(Math.abs(notional).toFixed(1)),
-                        // Первая биржа - всегда LONG, вторая - всегда SHORT
                         exchanges: `${longExchangeInfo.name}-${shortExchangeInfo.name}`,
-                        // funding1 - всегда от LONG, funding2 - всегда от SHORT
                         funding1: formatFunding(longExchangeInfo.funding),
                         funding2: formatFunding(shortExchangeInfo.funding),
                         fundingDiff: parseFloat(((shortPos.fundingRate - longPos.fundingRate) * 3 * 365).toFixed(1)),

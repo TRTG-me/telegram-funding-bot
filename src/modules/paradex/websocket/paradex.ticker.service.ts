@@ -32,7 +32,7 @@ export class ParadexTickerService {
                 const subscriptionMessage = {
                     jsonrpc: "2.0",
                     method: "subscribe",
-                    params: { channel: `bbo.${symbol.toUpperCase()}` },
+                    params: { channel: `bbo.${symbol}` },
                     id: this.subscriptionId++
                 };
                 currentConnection.send(JSON.stringify(subscriptionMessage));
