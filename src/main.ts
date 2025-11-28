@@ -23,6 +23,8 @@ import { TotalPositionsController } from './modules/totalPositions/totalPosition
 import { TotalPositionsService } from './modules/totalPositions/totalPositions.service';
 import { TotalFundingsController } from './modules/totalFundings/totalFundings.controller';
 import { TotalFundingsService } from './modules/totalFundings/totalFundings.service';
+import { BinTradeController } from './modules/bin_trade/bin_trade.controller';
+import { HypeTradeController } from './modules/hl_trade/hl_trade.controller';
 
 import { BinanceTickerService } from './modules/binance/websocket/binance.ticker.service';
 import { BinanceTickerController } from './modules/binance/websocket/binance.ticker.controller';
@@ -44,7 +46,7 @@ import { BpController } from './modules/bp/bp.controller';
 
 // --- ИЗМЕНЕНИЕ 1: Добавляем новую строку с кнопками для тикера ---
 const mainMenuKeyboard = Markup.keyboard([
-    ['Плечи', 'Позиции', 'Фандинги', 'bp'],
+    ['Плечи', 'Позиции', 'Фандинги', 'bp', 'Trade'],
     ['Включить Alert', 'Выключить Alert', '✏️Изменить ранги'],
     ['🚀 Запустить тикер', '🛑 Остановить тикер'] // <--- НОВАЯ СТРОКА
 ]).resize();
@@ -106,6 +108,8 @@ async function start() {
     const extendedTickerController = new ExtendedTickerController(extendedTickerService);
     const lighterTickerController = new LighterTickerController(lighterTickerService);
     const bpController = new BpController(bpService);
+    const binTradeController = new BinTradeController(binanceService);
+    const hypeTradeController = new HypeTradeController(hyperliquidService);
 
     // --- 3. Регистрация команды /start ---
     bot.start((ctx) => {
@@ -134,7 +138,7 @@ async function start() {
         const mainMenuCommands = [
             'Плечи', 'Позиции', 'Фандинги',
             'Включить Alert', 'Выключить Alert', '✏️ Изменить ранги',
-            '🚀 Запустить тикер', '🛑 Остановить тикер', 'bp' // <--- НОВЫЕ КОМАНДЫ
+            '🚀 Запустить тикер', '🛑 Остановить тикер', 'bp', 'Trade' // <--- НОВЫЕ КОМАНДЫ
         ];
 
         // --- ЛОГИЧЕСКИЙ БЛОК 1: ПРИОРИТЕТНАЯ ОБРАБОТКА КОМАНД МЕНЮ ---
@@ -163,6 +167,8 @@ async function start() {
                     return binanceTickerController.stopTicker(ctx);
                 case 'bp':
                     return bpController.handleBpCommand(ctx);
+                case 'Trade':
+                    return hypeTradeController.handlePlaceOrderCommand(ctx);
             }
         }
         // --- ЛОГИЧЕСКИЙ БЛОК 2: ОБРАБОТКА СОСТОЯНИЙ ---
