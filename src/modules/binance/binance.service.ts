@@ -3,6 +3,7 @@ import axios from 'axios';
 import {
     DerivativesTradingPortfolioMargin,
     DERIVATIVES_TRADING_PORTFOLIO_MARGIN_REST_API_PROD_URL,
+    DerivativesTradingPortfolioMarginRestAPI
 } from '@binance/derivatives-trading-portfolio-margin';
 
 import { IExchangeData, IDetailedPosition, IAccountInfoBin, IPositionInfoBin } from '../../common/interfaces';
@@ -28,6 +29,7 @@ export class BinanceService {
             apiSecret,
             basePath: DERIVATIVES_TRADING_PORTFOLIO_MARGIN_REST_API_PROD_URL,
             recvWindow: 20000, // базовое; на подписанных вызовах проставим своё 60000
+            timeout: 30000
         };
 
         this.client = new DerivativesTradingPortfolioMargin({ configurationRestAPI });
@@ -195,9 +197,64 @@ export class BinanceService {
         const start = Date.now();
         const res = await axios.get(url);
         const end = Date.now();
-        // console.log('[Binance public GET] /ticker/24hr RTT(ms):', end - start);
+
         return res.data as IExchangeData;
     }
+
+    public async placeBinOrder(
+        symbol: string,
+        side: 'BUY' | 'SELL',
+        quantity: number,
+        price: number
+    ): Promise<any> {
+        try {
+            console.log(`[Binance] Placing order: ${side} ${quantity} ${symbol} @ ${price}`);
+            const { DerivativesTradingPortfolioMarginRestAPI } = await import('@binance/derivatives-trading-portfolio-margin');
+
+            const response = await (this.client as any).restAPI.newUmOrder({
+                symbol: symbol,
+                side: side === 'BUY'
+                    ? DerivativesTradingPortfolioMarginRestAPI.NewUmOrderSideEnum.BUY
+                    : DerivativesTradingPortfolioMarginRestAPI.NewUmOrderSideEnum.SELL,
+                type: DerivativesTradingPortfolioMarginRestAPI.NewUmOrderTypeEnum.MARKET,
+                quantity: quantity,
+                //  price: price,
+                // timeInForce: 'GTC',
+                timestamp: this.nowMs(),
+                recvWindow: 60000,
+            });
+
+            const data = await response.data();
+            return data;
+
+        } catch (err) {
+            console.error('Error placing Binance order:', err);
+            const message = this.getErrorMessage(err);
+            throw new Error(`Failed to place order on Binance: ${message}`);
+        }
+    }
+
+    public async getBinOrderInfo(symbol: string, clientOrderId: string): Promise<any> {
+        try {
+
+            const response = await (this.client as any).restAPI.queryUmOrder({
+                symbol: symbol,
+                origClientOrderId: clientOrderId, // Передаем ID, полученный при создании
+
+            });
+
+            const data = typeof response?.data === 'function' ? await response.data() : (response?.data ?? response);
+
+            return data;
+        } catch (err) {
+            console.error('Error fetching order status:', err);
+            const message = this.getErrorMessage(err);
+            throw new Error(`Failed to fetch order status: ${message}`);
+        }
+    }
+
+
+
 }
 
 export default BinanceService;
