@@ -10,7 +10,7 @@ import {
     IAssetDataContextHyper
 } from '../../common/interfaces';
 
-// Импортируем SDK. Используем require, так как у этой библиотеки нет официальных типов @types
+// Импортируем SDK.
 const { Hyperliquid } = require('hyperliquid');
 
 // Тип для полного ответа от запроса "metaAndAssetCtxs"
@@ -19,12 +19,13 @@ type MetaAndAssetCtxsResponse = [{ universe: IAssetNameInfoHyper[] }, IAssetData
 export class HyperliquidService {
     private readonly API_URL = 'https://api.hyperliquid.xyz/info';
 
-    // Данные для подключения
+    // ID второго декса (Spot или другой Perp universe)
+    private readonly SECONDARY_DEX_ID = 'xyz';
+
     private readonly userAddress: string;
     private readonly userAddress_main: string;
     private readonly privateKey: string;
 
-    // Экземпляр SDK
     private sdk: any = null;
     private sdkInitialized = false;
 
@@ -37,19 +38,16 @@ export class HyperliquidService {
             throw new Error('Hyperliquid Wallet Address (ACCOUNT_HYPERLIQUID_ETH) must be provided in .env file');
         }
 
-        // Если есть приватный ключ, инициализируем SDK для торговли
         if (this.privateKey) {
             this.sdk = new Hyperliquid({
-                enableWs: false, // Нам пока хватит REST
+                enableWs: false,
                 privateKey: this.privateKey,
-                testnet: true,  // false = Mainnet
+                testnet: true,
                 walletAddress: this.userAddress,
             });
-
-            // Инициализацию запускаем в фоне, чтобы не блокировать конструктор
             this.initSdk().catch(err => console.error('Failed to init Hyperliquid SDK:', err));
         } else {
-            console.warn('[Hyperliquid] Private Key missing. Trading functions will not work, only data fetching.');
+            console.warn('[Hyperliquid] Private Key missing. Trading functions will not work.');
         }
     }
 
@@ -64,7 +62,6 @@ export class HyperliquidService {
         }
     }
 
-    // Хелпер: ждем инициализации перед торговым запросом
     private async ensureSdkReady() {
         if (!this.sdk) throw new Error('Hyperliquid Private Key is not set.');
         if (!this.sdkInitialized) await this.initSdk();
@@ -75,79 +72,132 @@ export class HyperliquidService {
         try { return JSON.stringify(error); } catch { return String(error); }
     }
 
-    private async getAccountState(): Promise<IHyperliquidAccountInfo> {
+    // --- State fetching helper ---
+    private async getAccountState(dex?: string): Promise<IHyperliquidAccountInfo> {
         try {
-            const response = await axios.post(this.API_URL, {
+            const body: any = {
                 type: 'clearinghouseState',
                 user: this.userAddress_main,
-            });
+            };
+            if (dex) {
+                body.dex = dex;
+            }
+
+            const response = await axios.post(this.API_URL, body);
             return response.data || {};
         } catch (error) {
+            if (dex) {
+                console.warn(`Failed to fetch Secondary State (dex: ${dex}):`, this.getErrorMessage(error));
+                return {} as IHyperliquidAccountInfo;
+            }
             const message = this.getErrorMessage(error);
             throw new Error(`Failed to fetch Hyperliquid account state: ${message}`);
         }
     }
 
-    private async getAssetContexts(): Promise<ICombinedAssetCtxHyper[] | null> {
+    // --- Asset Contexts fetching helper (Single Request) ---
+    private async fetchContextsForDex(dex?: string): Promise<ICombinedAssetCtxHyper[]> {
         try {
-            const response = await axios.post<MetaAndAssetCtxsResponse>(this.API_URL, {
+            const body: any = {
                 type: 'metaAndAssetCtxs',
-            });
-            const [meta, contexts] = response.data;
-            if (meta.universe.length !== contexts.length) {
-                console.error("Universe and contexts arrays have different lengths!");
-                return null;
+            };
+            if (dex) {
+                body.dex = dex;
             }
+
+            const response = await axios.post<MetaAndAssetCtxsResponse>(this.API_URL, body);
+            const [meta, contexts] = response.data;
+
+            if (!meta?.universe || !contexts) return [];
+            if (meta.universe.length !== contexts.length) {
+                console.warn(`[Hyperliquid] Universe/Contexts mismatch for dex: ${dex || 'main'}`);
+                return [];
+            }
+
             return meta.universe.map((asset, i) => ({
                 name: asset.name,
                 funding: contexts[i].funding,
             }));
+
         } catch (error) {
-            const message = this.getErrorMessage(error);
-            throw new Error(`Failed to fetch Hyperliquid asset contexts: ${message}`);
+            if (dex) {
+                console.warn(`Failed to fetch contexts for dex '${dex}':`, this.getErrorMessage(error));
+                return [];
+            }
+            throw new Error(`Failed to fetch Hyperliquid asset contexts: ${this.getErrorMessage(error)}`);
         }
     }
 
-    private async _getCoreAccountData(): Promise<{ accountState: IHyperliquidAccountInfo, assetContexts: ICombinedAssetCtxHyper[] }> {
-        const [accountState, assetContexts] = await Promise.all([
-            this.getAccountState(),
-            this.getAssetContexts()
+    // --- Main Asset Contexts (Parallel) ---
+    private async getAssetContexts(): Promise<ICombinedAssetCtxHyper[] | null> {
+        try {
+            const [mainContexts, secondaryContexts] = await Promise.all([
+                this.fetchContextsForDex(),                     // Main
+                this.fetchContextsForDex(this.SECONDARY_DEX_ID) // Secondary
+            ]);
+
+            return [...mainContexts, ...secondaryContexts];
+        } catch (error) {
+            throw error;
+        }
+    }
+
+    // --- Core Data Fetcher (Parallel: Main State + Sec State + Contexts) ---
+    private async _getCoreAccountData(): Promise<{
+        mainState: IHyperliquidAccountInfo,
+        secondaryState: IHyperliquidAccountInfo,
+        assetContexts: ICombinedAssetCtxHyper[]
+    }> {
+        const [mainState, secondaryState, assetContexts] = await Promise.all([
+            this.getAccountState(),                     // Main
+            this.getAccountState(this.SECONDARY_DEX_ID), // Secondary
+            this.getAssetContexts()                     // Contexts (Merged)
         ]);
 
-        if (!Array.isArray(accountState.assetPositions) || !assetContexts) {
+        if (!assetContexts) {
             throw new Error('Incomplete or invalid data received from Hyperliquid API.');
         }
 
-        return { accountState, assetContexts };
+        return { mainState, secondaryState, assetContexts };
     }
 
     public async getDetailedPositions(): Promise<IDetailedPosition[]> {
         try {
-            const { accountState, assetContexts } = await this._getCoreAccountData();
+            const { mainState, secondaryState, assetContexts } = await this._getCoreAccountData();
 
+            // Создаем Map для быстрого поиска фандинга по имени монеты
+            // (если монеты в двух дексах называются одинаково, победит последняя)
             const fundingMap = new Map<string, string>(
                 assetContexts.map(asset => [asset.name, asset.funding])
             );
 
-            return accountState.assetPositions
-                ?.filter(p => p.position?.szi && parseFloat(p.position.szi) !== 0)
-                .map(p => {
-                    const position = p.position;
-                    const coin = position.coin!;
-                    const szi = parseFloat(position.szi!);
-                    const notional = position.positionValue!;
-                    const hourlyFundingRate = parseFloat(fundingMap.get(coin) || '0');
-                    const fundingRate = hourlyFundingRate * 8 * 100;
+            const mapPositions = (positions: any[], exchangeLabel: string): IDetailedPosition[] => {
+                if (!Array.isArray(positions)) return [];
+                return positions
+                    .filter(p => p.position?.szi && parseFloat(p.position.szi) !== 0)
+                    .map(p => {
+                        const position = p.position;
+                        const coin = position.coin!;
+                        const szi = parseFloat(position.szi!);
+                        const notional = position.positionValue!;
+                        const hourlyFundingRate = parseFloat(fundingMap.get(coin) || '0');
+                        const fundingRate = hourlyFundingRate * 8 * 100;
 
-                    return {
-                        coin: coin,
-                        notional: notional,
-                        size: Math.abs(szi),
-                        side: szi > 0 ? 'L' : 'S',
-                        exchange: 'H',
-                        fundingRate: fundingRate,
-                    };
-                }) || [];
+                        return {
+                            coin: coin,
+                            notional: notional,
+                            size: Math.abs(szi),
+                            side: szi > 0 ? 'L' : 'S',
+                            exchange: exchangeLabel,
+                            fundingRate: fundingRate,
+                        };
+                    });
+            };
+
+            const listA = mapPositions(mainState.assetPositions || [], 'H');
+            const listB = mapPositions(secondaryState.assetPositions || [], 'H'); // H_SUB или просто H
+
+            return [...listA, ...listB];
 
         } catch (err) {
             const message = this.getErrorMessage(err);
@@ -158,38 +208,38 @@ export class HyperliquidService {
 
     public async calculateLeverage(): Promise<IExchangeData> {
         try {
-            const { accountState } = await this._getCoreAccountData();
+            const { mainState, secondaryState } = await this._getCoreAccountData();
 
-            if (
-                !accountState.marginSummary ||
-                typeof accountState.marginSummary.accountValue !== 'string' ||
-                typeof accountState.marginSummary.totalNtlPos !== 'string' ||
-                typeof accountState.crossMaintenanceMarginUsed !== 'string'
-            ) {
-                throw new Error('Incomplete margin data received from Hyperliquid API.');
-            }
+            const extractData = (state: IHyperliquidAccountInfo) => {
+                if (!state.marginSummary) return { val: 0, ntl: 0, maint: 0 };
+                return {
+                    val: parseFloat(state.marginSummary.accountValue || '0'),
+                    ntl: parseFloat(state.marginSummary.totalNtlPos || '0'),
+                    maint: parseFloat(state.crossMaintenanceMarginUsed || '0')
+                };
+            };
 
-            const accountValue = parseFloat(accountState.marginSummary.accountValue);
-            const marginUsed = parseFloat(accountState.crossMaintenanceMarginUsed);
-            const totalNtlPos = parseFloat(accountState.marginSummary.totalNtlPos);
+            const main = extractData(mainState);
+            const sec = extractData(secondaryState);
 
-            if (isNaN(accountValue) || isNaN(marginUsed) || isNaN(totalNtlPos)) {
-                throw new Error('Failed to parse financial data from API response.');
-            }
+            const totalAccountValue = main.val + sec.val;
+            const totalNotional = main.ntl + sec.ntl;
+            const totalMaintUsed = main.maint + sec.maint;
 
-            const denominator = accountValue - marginUsed;
+            const denominator = totalAccountValue - totalMaintUsed;
             let leverage = 0;
 
             if (denominator !== 0) {
-                leverage = totalNtlPos / denominator;
-                if (!isFinite(leverage)) {
-                    throw new Error('Leverage calculation resulted in a non-finite number.');
-                }
+                leverage = totalNotional / denominator;
+            }
+
+            if (totalAccountValue === 0 && totalNotional === 0 && main.val !== 0) {
+                return { leverage: main.ntl / (main.val - main.maint), accountEquity: main.val };
             }
 
             return {
                 leverage,
-                accountEquity: accountValue,
+                accountEquity: totalAccountValue,
             };
 
         } catch (err) {
@@ -209,15 +259,8 @@ export class HyperliquidService {
             console.log(`[Hyperliquid] Placing MARKET order: ${side} ${quantity} ${symbol}`);
 
             const isBuy = side === 'BUY';
+            const result = await this.sdk.custom.marketOpen(symbol, isBuy, quantity);
 
-            // 1. Отправляем ордер
-            const result = await this.sdk.custom.marketOpen(
-                symbol,
-                isBuy,
-                quantity
-            );
-
-            // 2. Валидация ответа
             const statuses = result.response?.data?.statuses;
             if (!statuses || statuses.length === 0) {
                 throw new Error(`Unknown response structure: ${JSON.stringify(result)}`);
@@ -228,33 +271,20 @@ export class HyperliquidService {
                 throw new Error(`Hyperliquid returned error: ${statusInfo.error}`);
             }
 
-            // 3. ПАРСИНГ ДАННЫХ (Самое важное)
-            // Для Маркет ордера данные лежат в поле 'filled'
-            // Для Лимитного (который не исполнился сразу) в поле 'resting'
             const filledData = statusInfo.filled;
             const restingData = statusInfo.resting;
 
-            // Достаем ID
             const oid = filledData?.oid || restingData?.oid;
-
-            // Достаем Цену исполнения (avgPx)
-            // Если filled - там есть avgPx. Если resting - берем limitPx (хотя для маркета resting редкость)
             const avgPrice = filledData?.avgPx || restingData?.limitPx || '0';
-
-            // Достаем Исполненный объем
             const executedQty = filledData?.totalSz || restingData?.sz || quantity;
 
-            // 4. Формируем красивый объект для контроллера
             const responseData = {
                 symbol: symbol,
                 orderId: oid,
                 side: side,
                 status: filledData ? 'FILLED' : 'NEW',
-
-                // ВАЖНО: возвращаем то, что достали из filled
                 avgPrice: parseFloat(avgPrice),
                 executedQty: parseFloat(executedQty),
-
                 originalResponse: statusInfo
             };
 
@@ -267,5 +297,4 @@ export class HyperliquidService {
             throw new Error(`Failed to place order on Hyperliquid: ${message}`);
         }
     }
-
 }

@@ -6,7 +6,6 @@ import { LighterService } from '../lighter/lighter.service';
 import { ExtendedService } from '../extended/extended.service';
 import { IDetailedPosition } from '../../common/interfaces';
 
-
 export interface HedgedPair {
     coin: string;
     notional: number;
@@ -53,18 +52,31 @@ export class TotalPositionsService {
         results.forEach((result, index) => {
             if (result.status === 'fulfilled') {
                 // --- ГЛАВНОЕ ИЗМЕНЕНИЕ: Нормализация названий монет ---
-                // Мы преобразуем все позиции, "на лету" заменяя 'kBONK' на '1000BONK'
                 const normalizedPositions = result.value.map(position => {
-                    // Создаем копию, чтобы не изменять оригинальные данные (хорошая практика)
+                    // Создаем копию, чтобы не изменять оригинальные данные
                     const newPosition = { ...position };
-
                     const upperCoin = newPosition.coin.toUpperCase();
+
+                    // 1. Кейс BONK: 1000BONK -> KBONK
                     if (upperCoin === '1000BONK' || upperCoin === 'KBONK') {
-                        if (newPosition.coin !== 'KBONK') { // Логируем только если есть изменения
-                            console.log(`Normalizing position for ${newPosition.coin} from ${newPosition.exchange} to KBONK.`);
+                        if (newPosition.coin !== 'KBONK') {
+                            // console.log(`Normalizing position for ${newPosition.coin} from ${newPosition.exchange} to KBONK.`);
                         }
-                        newPosition.coin = 'KBONK'; // Целевое имя
+                        newPosition.coin = 'KBONK';
                     }
+
+                    // 2. Кейс TECH100: XYZ100 -> TECH100m
+                    // Проверяем вариации: XYZ100 (Hyperliquid) или TECH100M (Extended)
+                    else if (
+                        upperCoin === 'XYZ:XYZ100' || // Твой случай из телеграма
+                        upperCoin === 'XYZ100' ||     // Старый случай
+                        upperCoin === 'TECH100M'      // Название на Extended
+                    ) {
+                        // console.log(`Normalizing ${newPosition.coin} to TECH100m`);
+                        // Приводим все варианты к единому названию
+                        newPosition.coin = 'TECH100m';
+                    }
+
                     return newPosition;
                 });
 
@@ -80,12 +92,14 @@ export class TotalPositionsService {
     }
 
     private _findAndPairPositions(positions: IDetailedPosition[]): AggregatedPositions {
-        // ... остальная часть этого метода остается БЕЗ ИЗМЕНЕНИЙ ...
         const hedgedPairs: HedgedPair[] = [];
         const TOLERANCE = 1e-9;
         const formatFunding = (rate: number): number => parseFloat(rate.toFixed(4));
+
+        // Создаем рабочие копии позиций с полем remainingSize
         const workingPositions = positions.map(p => ({ ...p, remainingSize: p.size }));
         const positionsByCoin = new Map<string, typeof workingPositions>();
+
         for (const pos of workingPositions) {
             if (!positionsByCoin.has(pos.coin)) {
                 positionsByCoin.set(pos.coin, []);
@@ -106,7 +120,6 @@ export class TotalPositionsService {
                     const matchSize = Math.min(longPos.remainingSize, shortPos.remainingSize);
                     longPos.remainingSize -= matchSize;
                     shortPos.remainingSize -= matchSize;
-
 
                     const longExchangeInfo = { name: longPos.exchange, funding: longPos.fundingRate };
                     const shortExchangeInfo = { name: shortPos.exchange, funding: shortPos.fundingRate };
