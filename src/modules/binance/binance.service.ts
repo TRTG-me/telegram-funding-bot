@@ -3,13 +3,22 @@ import axios from 'axios';
 import {
     DerivativesTradingPortfolioMargin,
     DERIVATIVES_TRADING_PORTFOLIO_MARGIN_REST_API_PROD_URL,
-    DerivativesTradingPortfolioMarginRestAPI
+    DerivativesTradingPortfolioMarginRestAPI,
+
 } from '@binance/derivatives-trading-portfolio-margin';
+
+import {
+    DerivativesTradingUsdsFutures,
+    DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL,
+    DerivativesTradingUsdsFuturesRestAPI,
+
+} from '@binance/derivatives-trading-usds-futures';
 
 import { IExchangeData, IDetailedPosition, IAccountInfoBin, IPositionInfoBin } from '../../common/interfaces';
 
 export class BinanceService {
-    private client: DerivativesTradingPortfolioMargin;
+    // private client: DerivativesTradingPortfolioMargin;
+    private client: DerivativesTradingUsdsFutures;
 
     // Смещение локального времени относительно серверного Binance
     private timeOffset = 0;
@@ -27,12 +36,13 @@ export class BinanceService {
         const configurationRestAPI = {
             apiKey,
             apiSecret,
-            basePath: DERIVATIVES_TRADING_PORTFOLIO_MARGIN_REST_API_PROD_URL,
+            basePath: DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL,
             recvWindow: 20000, // базовое; на подписанных вызовах проставим своё 60000
             timeout: 30000
         };
 
-        this.client = new DerivativesTradingPortfolioMargin({ configurationRestAPI });
+        //this.client = new DerivativesTradingPortfolioMargin({ configurationRestAPI });
+        this.client = new DerivativesTradingUsdsFutures({ configurationRestAPI });
 
         // Первичная синхронизация времени и периодическое обновление
         this.syncTime().catch(() => { });
@@ -83,7 +93,8 @@ export class BinanceService {
         try {
             const ts = this.nowMs();
             // console.log('[Binance SDK GET] queryUmPositionInformation timestamp:', ts, 'recvWindow:', 60000);
-            const resp = await (this.client as any).restAPI.queryUmPositionInformation({
+            //const resp = await (this.client as any).restAPI.queryUmPositionInformation({
+            const resp = await (this.client as any).restAPI.positionInformationV3({
                 timestamp: ts,
                 recvWindow: 60000,
             });
@@ -204,28 +215,32 @@ export class BinanceService {
     public async placeBinOrder(
         symbol: string,
         side: 'BUY' | 'SELL',
-        quantity: number,
-        price: number
+        quantity: number
     ): Promise<any> {
         try {
-            console.log(`[Binance] Placing order: ${side} ${quantity} ${symbol} @ ${price}`);
-            const { DerivativesTradingPortfolioMarginRestAPI } = await import('@binance/derivatives-trading-portfolio-margin');
+            //const { DerivativesTradingPortfolioMarginRestAPI } = await import('@binance/derivatives-trading-portfolio-margin');
+            const { DerivativesTradingUsdsFuturesRestAPI } = await import('@binance/derivatives-trading-usds-futures');
 
-            const response = await (this.client as any).restAPI.newUmOrder({
+            // Генерируем уникальный ID для отслеживания
+            const clientOrderId = `bot_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+            console.log(`[Binance] Placing MARKET ${side} ${quantity} ${symbol}. ClOrdID: ${clientOrderId}`);
+
+            const response = await (this.client as any).restAPI.newOrder({
                 symbol: symbol,
                 side: side === 'BUY'
-                    ? DerivativesTradingPortfolioMarginRestAPI.NewUmOrderSideEnum.BUY
-                    : DerivativesTradingPortfolioMarginRestAPI.NewUmOrderSideEnum.SELL,
-                type: DerivativesTradingPortfolioMarginRestAPI.NewUmOrderTypeEnum.MARKET,
+                    ? DerivativesTradingUsdsFuturesRestAPI.NewOrderSideEnum.BUY
+                    : DerivativesTradingUsdsFuturesRestAPI.NewOrderSideEnum.SELL,
+                //type: DerivativesTradingUsdsFuturesRestAPI.NewOrderTypeEnum.MARKET,
+                type: 'MARKET',
                 quantity: quantity,
-                //  price: price,
-                // timeInForce: 'GTC',
+                newClientOrderId: clientOrderId, // Важно!
                 timestamp: this.nowMs(),
                 recvWindow: 60000,
             });
 
             const data = await response.data();
-            return data;
+            // Возвращаем данные + наш ID, чтобы сервис мог проверить статус
+            return { ...data, clientOrderId };
 
         } catch (err) {
             console.error('Error placing Binance order:', err);
@@ -234,25 +249,24 @@ export class BinanceService {
         }
     }
 
+    // Метод проверки статуса ордера
     public async getBinOrderInfo(symbol: string, clientOrderId: string): Promise<any> {
         try {
-
-            const response = await (this.client as any).restAPI.queryUmOrder({
+            const response = await (this.client as any).restAPI.queryOrder({
                 symbol: symbol,
-                origClientOrderId: clientOrderId, // Передаем ID, полученный при создании
-
+                origClientOrderId: clientOrderId,
+                timestamp: this.nowMs(),
+                recvWindow: 60000,
             });
 
             const data = typeof response?.data === 'function' ? await response.data() : (response?.data ?? response);
-
             return data;
         } catch (err) {
-            console.error('Error fetching order status:', err);
-            const message = this.getErrorMessage(err);
-            throw new Error(`Failed to fetch order status: ${message}`);
+            console.error('Error fetching Binance order status:', err);
+            // Не выбрасываем ошибку сразу, чтобы логика бота могла обработать это
+            return null;
         }
     }
-
 
 
 }

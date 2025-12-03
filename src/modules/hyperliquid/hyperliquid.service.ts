@@ -17,7 +17,8 @@ const { Hyperliquid } = require('hyperliquid');
 type MetaAndAssetCtxsResponse = [{ universe: IAssetNameInfoHyper[] }, IAssetDataContextHyper[]];
 
 export class HyperliquidService {
-    private readonly API_URL = 'https://api.hyperliquid.xyz/info';
+    //private readonly API_URL = 'https://api.hyperliquid.xyz/info';
+    private readonly API_URL = 'https://api.hyperliquid-testnet.xyz/info';
 
     // ID второго декса (Spot или другой Perp universe)
     private readonly SECONDARY_DEX_ID = 'xyz';
@@ -32,6 +33,7 @@ export class HyperliquidService {
     constructor() {
         this.userAddress = process.env.HL_WALLET_ADDRESS || '';
         this.userAddress_main = process.env.ACCOUNT_HYPERLIQUID_ETH || '';
+
         this.privateKey = process.env.HL_PRIVATE_KEY || '';
 
         if (!this.userAddress) {
@@ -182,6 +184,7 @@ export class HyperliquidService {
                         const notional = position.positionValue!;
                         const hourlyFundingRate = parseFloat(fundingMap.get(coin) || '0');
                         const fundingRate = hourlyFundingRate * 8 * 100;
+                        const entryPx = parseFloat(position.entryPx || '0');
 
                         return {
                             coin: coin,
@@ -190,6 +193,7 @@ export class HyperliquidService {
                             side: szi > 0 ? 'L' : 'S',
                             exchange: exchangeLabel,
                             fundingRate: fundingRate,
+                            entryPrice: entryPx,
                         };
                     });
             };
@@ -204,6 +208,13 @@ export class HyperliquidService {
             console.error('Error fetching Hyperliquid detailed positions:', err);
             throw new Error(`Failed to get detailed positions from Hyperliquid: ${message}`);
         }
+    }
+    public async getOpenPosition(symbol: string): Promise<IDetailedPosition | undefined> {
+        // Hyperliquid в стейте возвращает "ETH", а мы можем искать "ETH-PERP"
+        const cleanSymbol = symbol.replace('-PERP', '');
+
+        const allPositions = await this.getDetailedPositions();
+        return allPositions.find(p => p.coin === cleanSymbol);
     }
 
     public async calculateLeverage(): Promise<IExchangeData> {
@@ -288,7 +299,6 @@ export class HyperliquidService {
                 originalResponse: statusInfo
             };
 
-            console.log('[Hyperliquid] Market Order parsed:', responseData);
             return responseData;
 
         } catch (err) {
