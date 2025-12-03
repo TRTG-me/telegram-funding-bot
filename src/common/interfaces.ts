@@ -9,7 +9,8 @@ export interface IDetailedPosition {
     size: number;           // Размер позиции (абсолютное значение)
     side: 'L' | 'S';        // Сторона позиции: L - Long, S - Short
     exchange: string;
-    fundingRate: number        // Биржа (B для Binance)
+    fundingRate: number
+    entryPrice?: number       // Биржа (B для Binance)
 }
 
 export interface IParadexAccountResponse {

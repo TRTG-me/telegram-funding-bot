@@ -44,11 +44,15 @@ import { LighterTickerController } from './modules/lighter/websocket/lighter.tic
 import { BpService } from './modules/bp/bp.service';
 import { BpController } from './modules/bp/bp.controller';
 
-// --- ИЗМЕНЕНИЕ 1: Добавляем новую строку с кнопками для тикера ---
+// --- NEW: Импорты AutoTrade ---
+import { AutoTradeService } from './modules/auto_trade/auto_trade.service';
+import { AutoTradeController } from './modules/auto_trade/auto_trade.controller';
+
+// --- ИЗМЕНЕНИЕ: Добавляем 'OPEN POS' в клавиатуру ---
 const mainMenuKeyboard = Markup.keyboard([
-    ['Плечи', 'Позиции', 'Фандинги', 'bp', 'Trade'],
+    ['Плечи', 'Позиции', 'Фандинги', 'bp', 'OPEN POS'], // <-- Trade заменил на OPEN POS (или добавил рядом)
     ['Включить Alert', 'Выключить Alert', '✏️Изменить ранги'],
-    ['🚀 Запустить тикер', '🛑 Остановить тикер'] // <--- НОВАЯ СТРОКА
+    ['🚀 Запустить тикер', '🛑 Остановить тикер']
 ]).resize();
 
 const userState = new Map<number, string>();
@@ -66,12 +70,25 @@ async function start() {
     const paradexTickerService = new ParadexTickerService();
     const extendedTickerService = new ExtendedTickerService();
     const lighterTickerService = new LighterTickerService();
+
     const bpService = new BpService(
         binanceTickerService,
         hyperliquidTickerService,
         paradexTickerService,
         extendedTickerService,
         lighterTickerService
+    );
+
+    // --- NEW: Инициализация AutoTradeService ---
+    const autoTradeService = new AutoTradeService(
+        binanceTickerService,
+        hyperliquidTickerService,
+        // парадекс и остальные, если вы их добавили в конструктор сервиса
+        // paradexTickerService, ...
+
+        binanceService,
+        hyperliquidService,
+        // ...
     );
 
 
@@ -108,8 +125,12 @@ async function start() {
     const extendedTickerController = new ExtendedTickerController(extendedTickerService);
     const lighterTickerController = new LighterTickerController(lighterTickerService);
     const bpController = new BpController(bpService);
-    const binTradeController = new BinTradeController(binanceService);
-    const hypeTradeController = new HypeTradeController(hyperliquidService);
+
+    const binTradeController = new BinTradeController(binanceService); // Можно оставить если нужно
+    // const hypeTradeController = new HypeTradeController(hyperliquidService); // Можно оставить
+
+    // --- NEW: Инициализация AutoTradeController ---
+    const autoTradeController = new AutoTradeController(autoTradeService);
 
     // --- 3. Регистрация команды /start ---
     bot.start((ctx) => {
@@ -119,74 +140,96 @@ async function start() {
         ctx.reply('Привет! Используйте меню внизу.', mainMenuKeyboard);
     });
 
-
+    // --- 4. Обработчик Callback Query (кнопок) ---
     bot.on('callback_query', (ctx) => {
-        bpController.handleCallbackQuery(ctx);
+        // Проверяем, кто должен обработать callback
+        const data = (ctx.callbackQuery as any).data;
+
+        // Если это кнопки BP контроллера
+        if (data && data.startsWith('bp_')) {
+            return bpController.handleCallbackQuery(ctx);
+        }
+
+        // --- NEW: Если это кнопки AutoTrade (at_ или stop_autotrade) ---
+        if (data && (data.startsWith('at_') || data === 'stop_autotrade')) {
+            return autoTradeController.handleCallback(ctx);
+        }
+
+        // Другие колбеки...
     });
+
+    // --- 5. Обработчик Текста ---
     bot.on(message('text'), (ctx) => {
         const userId = ctx.from?.id;
         if (!userId) return;
+        const text = ctx.message.text;
 
+        // =================================================================
+        // 1. СНАЧАЛА ПРОВЕРЯЕМ ГЛОБАЛЬНЫЕ КОМАНДЫ (КНОПКИ МЕНЮ)
+        // =================================================================
+        const mainMenuCommands = [
+            'Плечи', 'Позиции', 'Фандинги',
+            'Включить Alert', 'Выключить Alert', '✏️ Изменить ранги',
+            '🚀 Запустить тикер', '🛑 Остановить тикер', 'bp',
+            'OPEN POS'
+        ];
+
+        if (mainMenuCommands.includes(text)) {
+            // Если нажали любую кнопку меню - мы СБРАСЫВАЕМ старые стейты
+            // Это позволяет выйти из любого зависшего ввода
+            userState.delete(userId);
+            // Обратите внимание: мы НЕ удаляем стейт AutoTrade тут вручную, 
+            // потому что handleOpenPosCommand сам решит, что делать (стопать или ресетить)
+
+            switch (text) {
+                // ... ваши старые кейсы ...
+                case 'Плечи': return summaryController.sendSummaryTable(ctx);
+                case 'Позиции': return totalPositionsController.displayAggregatedPositions(ctx);
+                // ...
+                case 'bp': return bpController.handleBpCommand(ctx);
+
+                // ГЛАВНОЕ:
+                case 'OPEN POS':
+                    return autoTradeController.handleOpenPosCommand(ctx);
+            }
+            return; // Важно: выходим, чтобы не попасть в блоки ниже
+        }
+
+        // =================================================================
+        // 2. ПОТОМ ПРОВЕРЯЕМ, ЖДЕМ ЛИ МЫ ВВОДА (AutoTrade, BP и т.д.)
+        // =================================================================
+
+        // Если юзер вводит данные для AutoTrade (название, кол-во...)
+        if (autoTradeController.isUserInFlow(userId)) {
+            return autoTradeController.handleInput(ctx);
+        }
+
+        // Если юзер вводит данные для BP
         if (bpController.isUserInBpFlow(userId)) {
             return bpController.handleCoinInput(ctx);
         }
 
+        // =================================================================
+        // 3. ОБРАБОТКА ДРУГИХ СТЕЙТОВ (Ранги и т.д.)
+        // =================================================================
         const currentState = userState.get(userId);
-        const text = ctx.message.text;
 
-        // --- ИЗМЕНЕНИЕ 2: Добавляем тексты новых кнопок в массив команд ---
-        const mainMenuCommands = [
-            'Плечи', 'Позиции', 'Фандинги',
-            'Включить Alert', 'Выключить Alert', '✏️ Изменить ранги',
-            '🚀 Запустить тикер', '🛑 Остановить тикер', 'bp', 'Trade' // <--- НОВЫЕ КОМАНДЫ
-        ];
-
-        // --- ЛОГИЧЕСКИЙ БЛОК 1: ПРИОРИТЕТНАЯ ОБРАБОТКА КОМАНД МЕНЮ ---
-        if (mainMenuCommands.includes(text)) {
-            userState.delete(userId);
-
-            // --- ИЗМЕНЕНИЕ 3: Добавляем обработку новых кнопок в switch ---
-            switch (text) {
-                case 'Плечи':
-                    return summaryController.sendSummaryTable(ctx);
-                case 'Позиции':
-                    return totalPositionsController.displayAggregatedPositions(ctx);
-                case '✏️ Изменить ранги':
-                    return rankingController.onUpdateRanksRequest(ctx);
-                case 'Включить Alert':
-                    return notificationController.startMonitoring(ctx);
-                case 'Выключить Alert':
-                    return notificationController.stopMonitoring(ctx);
-                case 'Фандинги':
-                    return totalFundingsController.displayHistoricalFunding(ctx);
-
-                // --- НОВЫЕ ОБРАБОТЧИКИ ДЛЯ ТИКЕРА ---
-                case '🚀 Запустить тикер':
-                    return binanceTickerController.startTicker(ctx);
-                case '🛑 Остановить тикер':
-                    return binanceTickerController.stopTicker(ctx);
-                case 'bp':
-                    return bpController.handleBpCommand(ctx);
-                case 'Trade':
-                    return hypeTradeController.handlePlaceOrderCommand(ctx);
-            }
-        }
-        // --- ЛОГИЧЕСКИЙ БЛОК 2: ОБРАБОТКА СОСТОЯНИЙ ---
-        else if (currentState === 'awaiting_ranks_json') {
+        if (currentState === 'awaiting_ranks_json') {
             return rankingController.onRanksJsonReceived(ctx);
         }
-        // --- ЛОГИЧЕСКИЙ БЛОК 3: НЕИЗВЕСТНАЯ КОМАНДА ---
         else {
             ctx.reply('Неизвестная команда. Пожалуйста, используйте кнопки внизу.', mainMenuKeyboard);
         }
     });
 
-    // --- 5. Запуск бота ---
+    // --- 6. Запуск бота ---
     await bot.launch();
     console.log('Бот успешно запущен со всеми модулями!');
     const gracefulShutdown = (signal: string) => {
         console.log(`\n[Graceful Shutdown] Получен сигнал ${signal}. Начинаем завершение работы...`);
         notificationService.stopAllMonitors();
+        // Можно добавить остановку всех трейд-сессий
+        // autoTradeService.stopAllSessions();
         bot.stop(signal);
         console.log('[Graceful Shutdown] Бот остановлен. Процесс завершается.');
         process.exit(0);
@@ -196,5 +239,4 @@ async function start() {
     process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 }
 
-// Запускаем всю нашу асинхронную функцию
 start();

@@ -27,7 +27,7 @@ export class BinTradeController {
                 orderParams.symbol,
                 orderParams.side,
                 orderParams.quantity,
-                orderParams.price
+
             );
 
             // Получаем ID созданного ордера
