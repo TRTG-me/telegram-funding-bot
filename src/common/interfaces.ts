@@ -27,6 +27,7 @@ export interface IParadexPosition {
     market?: string;
     size?: string;
     side?: 'LONG' | 'SHORT';
+    average_entry_price?: string;
 }
 
 export interface IParadexPositionsResponse {
@@ -58,6 +59,21 @@ export interface IAccountInfoBin {
     totalAvailableBalance?: string;
     totalMarginOpenLoss?: string;
     updateTime?: number;
+    totalInitialMargin?: string;
+    totalMaintMargin?: string;     // MaintMargin в Standard
+    totalWalletBalance?: string;
+    totalUnrealizedProfit?: string;
+    totalMarginBalance?: string;   // Equity в Standard
+    totalPositionInitialMargin?: string;
+    totalOpenOrderInitialMargin?: string;
+    totalCrossWalletBalance?: string;
+    totalCrossUnPnl?: string;
+    availableBalance?: string;
+    maxWithdrawAmount?: string;
+
+    // --- Общие поля (если есть) ---
+    assets?: any[];
+    positions?: any[];
 }
 
 export interface IPositionInfoBin {

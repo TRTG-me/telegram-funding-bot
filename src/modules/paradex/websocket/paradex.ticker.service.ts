@@ -7,7 +7,7 @@ export class ParadexTickerService {
     private subscriptionId: number = 1;
 
     constructor() {
-        console.log('ParadexTickerService initialized.');
+
     }
 
     /**

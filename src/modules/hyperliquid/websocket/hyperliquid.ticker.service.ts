@@ -6,7 +6,7 @@ export class HyperliquidTickerService {
     private ws: WebSocket | null = null;
 
     constructor() {
-        console.log('HyperliquidTickerService initialized.');
+
     }
 
     /**

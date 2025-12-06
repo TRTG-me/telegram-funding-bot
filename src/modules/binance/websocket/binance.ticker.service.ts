@@ -17,7 +17,6 @@ export class BinanceTickerService {
                 wsURL: process.env.WS_STREAMS_URL ?? DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL,
             },
         });
-        console.log('BinanceTickerService initialized.');
     }
 
     /**
