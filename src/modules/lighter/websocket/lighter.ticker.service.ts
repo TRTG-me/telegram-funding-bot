@@ -19,7 +19,7 @@ export class LighterTickerService {
     private orderBookStates = new Map<string, OrderBook>();
 
     constructor() {
-        console.log('LighterTickerService initialized.');
+
     }
 
     public start(marketIndex: string, callback: PriceUpdateCallback): Promise<void> {

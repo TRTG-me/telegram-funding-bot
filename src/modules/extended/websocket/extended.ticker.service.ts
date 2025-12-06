@@ -6,7 +6,7 @@ export class ExtendedTickerService {
     private ws: WebSocket | null = null;
 
     constructor() {
-        console.log('ExtendedTickerService initialized.');
+
     }
 
     /**

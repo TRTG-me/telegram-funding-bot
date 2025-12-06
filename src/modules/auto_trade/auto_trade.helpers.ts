@@ -1,6 +1,14 @@
 import { ExchangeName } from './auto_trade.service';
 import { BinanceService } from '../binance/binance.service';
 import { HyperliquidService } from '../hyperliquid/hyperliquid.service';
+import { ParadexService } from '../paradex/paradex.service';
+
+// Описываем интерфейс сервисов, чтобы не писать длинные типы в аргументах
+export interface ITradingServices {
+    binance: BinanceService;
+    hl: HyperliquidService;
+    paradex: ParadexService;
+}
 
 // --- УТИЛИТЫ ---
 
@@ -27,7 +35,7 @@ export async function formatSymbol(exchange: ExchangeName, coin: string): Promis
 
     switch (exchange) {
         case 'Binance': return `${finalCoin}USDT`;
-        case 'Hyperliquid': return finalCoin;
+        case 'Hyperliquid': return finalCoin; // Для сокета
         case 'Paradex': return `${finalCoin}-USD-PERP`;
         case 'Extended': return `${finalCoin}-USD`;
         case 'Lighter': return finalCoin;
@@ -42,17 +50,17 @@ export async function executeTrade(
     coin: string,
     side: 'BUY' | 'SELL',
     qty: number,
-    services: { binance: BinanceService, hl: HyperliquidService }
+    services: ITradingServices
 ): Promise<{ success: boolean, price?: number, error?: string }> {
     try {
         let symbol = await formatSymbol(exchange, coin);
 
+        // ============ BINANCE ============
         if (exchange === 'Binance') {
             const res = await services.binance.placeBinOrder(symbol, side, qty);
 
-            // Polling ожидания исполнения
             let attempts = 0;
-            while (attempts < 20) { // 10 секунд
+            while (attempts < 20) {
                 if (res.clientOrderId) {
                     const orderInfo = await services.binance.getBinOrderInfo(symbol, res.clientOrderId);
                     if (orderInfo && orderInfo.status === 'FILLED') {
@@ -64,11 +72,11 @@ export async function executeTrade(
                 await sleep(500);
                 attempts++;
             }
-            return { success: false, error: 'Binance Order Timeout (not FILLED)' };
+            return { success: false, error: 'Binance Order Timeout' };
         }
 
+        // ============ HYPERLIQUID ============
         else if (exchange === 'Hyperliquid') {
-            // HL требует -PERP для ордеров
             if (!symbol.includes('-PERP')) symbol = symbol + '-PERP';
 
             const res = await services.hl.placeMarketOrder(symbol, side, qty);
@@ -76,6 +84,18 @@ export async function executeTrade(
                 return { success: true, price: res.avgPrice };
             }
             return { success: false, error: `HL Status: ${res.status}` };
+        }
+
+        // ============ PARADEX ============
+        else if (exchange === 'Paradex') {
+            // Paradex ждет формат X-USD-PERP (formatSymbol это уже делает, но проверим)
+            if (!symbol.endsWith('-USD-PERP')) symbol = `${symbol}-USD-PERP`;
+
+            const res = await services.paradex.placeMarketOrder(symbol, side, qty);
+            if (res.status === 'FILLED') {
+                return { success: true, price: res.price };
+            }
+            return { success: false, error: `Paradex status: ${res.status}` };
         }
 
         return { success: false, error: `Exchange ${exchange} not supported` };
@@ -86,29 +106,21 @@ export async function executeTrade(
 
 // --- ЛОГИКА ДАННЫХ ---
 
-
 export async function getPositionData(
     exchange: ExchangeName,
     coin: string,
-    services: { binance: BinanceService, hl: HyperliquidService }
-): Promise<{ size: number, price: number }> { // Убрали null из типа возврата
+    services: ITradingServices
+): Promise<{ size: number, price: number }> {
     try {
         // ============ BINANCE ============
         if (exchange === 'Binance') {
             const targetSymbol = await formatSymbol('Binance', coin);
-            // Если этот вызов упадет, сработает catch ниже (Ошибка API)
-            const allPositions = await services.binance.getPositionInfo();
-
-            const pos = allPositions.find(p =>
-                p.symbol === targetSymbol &&
-                p.positionAmt &&
-                parseFloat(p.positionAmt) !== 0
-            );
+            const pos = await services.binance.getOpenPosition(targetSymbol);
 
             if (pos) {
                 return {
-                    size: Math.abs(parseFloat(pos.positionAmt!)),
-                    price: parseFloat(pos.entryPrice || '0')
+                    size: Math.abs(parseFloat(pos.amt)),
+                    price: parseFloat(pos.entryPrice)
                 };
             }
         }
@@ -116,10 +128,20 @@ export async function getPositionData(
         // ============ HYPERLIQUID ============
         else if (exchange === 'Hyperliquid') {
             const targetCoin = coin.toUpperCase().replace('-PERP', '');
-            // Если этот вызов упадет, сработает catch ниже (Ошибка API)
-            const allPositions = await services.hl.getDetailedPositions();
+            const pos = await services.hl.getOpenPosition(targetCoin);
 
-            const pos = allPositions.find(p => p.coin === targetCoin);
+            if (pos) {
+                return { size: pos.size, price: pos.entryPrice || 0 };
+            }
+        }
+
+        // ============ PARADEX ============
+        else if (exchange === 'Paradex') {
+            const targetSymbol = await formatSymbol('Paradex', coin); // Вернет XXX-USD-PERP
+
+            // Используем готовый метод поиска из сервиса (мы его добавили ранее)
+            // Это избавляет от ручного перебора массива и ошибок типизации 'p'
+            const pos = await services.paradex.getOpenPosition(targetSymbol);
 
             if (pos) {
                 return {
@@ -129,11 +151,10 @@ export async function getPositionData(
             }
         }
 
-        // Если дошли сюда, значит API ответило, но позы нет -> Возвращаем 0
+        // Если позиция не найдена (но API работает) -> Возвращаем 0
         return { size: 0, price: 0 };
 
     } catch (e: any) {
-        // Пробрасываем ошибку дальше, чтобы сервис понял, что это сбой
         throw new Error(`API Error [${exchange}]: ${e.message}`);
     }
 }
