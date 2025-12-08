@@ -34,6 +34,7 @@ import { NotificationController } from './modules/notifications/notification.con
 import { BinanceTickerController } from './modules/binance/websocket/binance.ticker.controller';
 import { BpController } from './modules/bp/bp.controller';
 import { AutoTradeController } from './modules/auto_trade/auto_trade.controller';
+import { ExtendedTradeController } from './modules/extended/extended.trade.controller';
 
 // --- Keyboard ---
 const mainMenuKeyboard = Markup.keyboard([
@@ -94,9 +95,11 @@ async function start() {
         binanceTickerService,
         hyperliquidTickerService,
         paradexTickerService,
+        extendedTickerService,
         binanceService,
         hyperliquidService,
-        paradexService
+        paradexService,
+        extendedService,
     );
 
     // ============================================================
@@ -111,6 +114,7 @@ async function start() {
     const binanceTickerController = new BinanceTickerController(binanceTickerService);
     const bpController = new BpController(bpService);
     const autoTradeController = new AutoTradeController(autoTradeService);
+    const extendedTradeController = new ExtendedTradeController(extendedService);
 
     // ============================================================
     // 3. ОБРАБОТЧИКИ TELEGRAM
@@ -174,6 +178,7 @@ async function start() {
                     return bpController.handleBpCommand(ctx);
                 case 'OPEN POS':
                     return autoTradeController.handleOpenPosCommand(ctx);
+                //return extendedTradeController.handleTestLimitOrder(ctx);
             }
             return;
         }

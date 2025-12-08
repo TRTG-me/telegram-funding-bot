@@ -105,6 +105,7 @@ export interface IExtendedPosition {
     side: 'LONG' | 'SHORT';
     size: string;
     value: string;
+    openPrice: string;
 }
 export interface IExtendedPositionsResponse {
     status: 'OK' | 'ERROR';
