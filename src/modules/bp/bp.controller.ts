@@ -118,8 +118,8 @@ export class BpController {
                 text = `*${currentState.coin} BP \\(${currentState.longExchange} / ${currentState.shortExchange}\\)*\n\n_Ожидание данных\\.\\.\\._`;
             } else {
                 text = `*${currentState.coin} BP \\(${currentState.longExchange} / ${currentState.shortExchange}\\)*\n\n` +
-                    `Long Price \\(ask\\): \`${data.longPrice.toFixed(6)}\`\n` +
-                    `Short Price \\(bid\\): \`${data.shortPrice.toFixed(6)}\`\n` +
+                    `Long Price \\(ask\\): \`${data.longPrice.toFixed(3)}\`\n` +
+                    `Short Price \\(bid\\): \`${data.shortPrice.toFixed(3)}\`\n` +
                     `BP: \`${data.bpValue.toFixed(1)}\``;
             }
 
