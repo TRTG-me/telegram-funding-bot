@@ -110,7 +110,7 @@ export class BpController {
             if (!currentState || currentState.step !== 'calculating') return;
 
             const now = Date.now();
-            if (currentState.lastUpdateTime && now - currentState.lastUpdateTime < 500) return;
+            if (currentState.lastUpdateTime && now - currentState.lastUpdateTime < 1000) return;
 
             let text: string;
             // --- ИЗМЕНЕНИЕ 3: Новая логика форматирования сообщения ---
@@ -118,8 +118,8 @@ export class BpController {
                 text = `*${currentState.coin} BP \\(${currentState.longExchange} / ${currentState.shortExchange}\\)*\n\n_Ожидание данных\\.\\.\\._`;
             } else {
                 text = `*${currentState.coin} BP \\(${currentState.longExchange} / ${currentState.shortExchange}\\)*\n\n` +
-                    `Long Price \\(ask\\): \`${data.longPrice.toFixed(3)}\`\n` +
-                    `Short Price \\(bid\\): \`${data.shortPrice.toFixed(3)}\`\n` +
+                    `Long Price \\(ask\\): \`${data.longPrice.toFixed(4)}\`\n` +
+                    `Short Price \\(bid\\): \`${data.shortPrice.toFixed(4)}\`\n` +
                     `BP: \`${data.bpValue.toFixed(1)}\``;
             }
 

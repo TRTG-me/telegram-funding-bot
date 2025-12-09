@@ -3,18 +3,20 @@ import { BinanceTickerService } from '../binance/websocket/binance.ticker.servic
 import { HyperliquidTickerService } from '../hyperliquid/websocket/hyperliquid.ticker.service';
 import { ParadexTickerService } from '../paradex/websocket/paradex.ticker.service';
 import { ExtendedTickerService } from '../extended/websocket/extended.ticker.service';
+import { LighterTickerService } from '../lighter/websocket/lighter.ticker.service';
 
 import { BinanceService } from '../binance/binance.service';
 import { HyperliquidService } from '../hyperliquid/hyperliquid.service';
 import { ParadexService } from '../paradex/paradex.service';
 import { ExtendedService } from '../extended/extended.service';
+import { LighterService } from '../lighter/lighter.service';
 
 import * as Helpers from './auto_trade.helpers';
 
 export type ExchangeName = 'Binance' | 'Hyperliquid' | 'Paradex' | 'Extended' | 'Lighter';
 
 // Допустимое отклонение BP в худшую сторону
-const ALLOWED_BP_SLIPPAGE = 300;
+const ALLOWED_BP_SLIPPAGE = 2;
 
 // Интерфейс данных для живого дашборда
 export interface TradeStatusData {
@@ -52,11 +54,13 @@ export class AutoTradeService {
         private hlTicker: HyperliquidTickerService,
         private paradexTicker: ParadexTickerService,
         private extendedTicker: ExtendedTickerService,
+        private lighterTicker: LighterTickerService,
 
         private binanceService: BinanceService,
         private hlService: HyperliquidService,
         private paradexService: ParadexService,
         private extendedService: ExtendedService,
+        private lighterService: LighterService
     ) { }
 
     private get services() {
@@ -64,7 +68,8 @@ export class AutoTradeService {
             binance: this.binanceService,
             hl: this.hlService,
             paradex: this.paradexService,
-            extended: this.extendedService
+            extended: this.extendedService,
+            lighter: this.lighterService,
         };
     }
 
@@ -95,6 +100,12 @@ export class AutoTradeService {
         if (this.isRunning(userId)) return onUpdate('⚠️ У вас уже запущен процесс.');
         if (totalQuantity <= 0 || stepQuantity <= 0) return onUpdate('❌ Ошибка: Количество <= 0');
         if (stepQuantity > totalQuantity) return onUpdate('❌ Ошибка: Шаг > Всего');
+        if (longExchange === 'Lighter' || shortExchange === 'Lighter') {
+            const exists = await this.lighterService.checkSymbolExists(coin);
+            if (!exists) {
+                return onUpdate(`❌ Ошибка: Монеты ${coin} нет на бирже Lighter!`);
+            }
+        }
 
         this.activeSessions.set(userId, true);
 
@@ -112,15 +123,40 @@ export class AutoTradeService {
         );
 
         try {
-            const longSymbol = await Helpers.formatSymbol(longExchange, coin);
-            const shortSymbol = await Helpers.formatSymbol(shortExchange, coin);
+            let longSymbol = await Helpers.formatSymbol(longExchange, coin);
+            let shortSymbol = await Helpers.formatSymbol(shortExchange, coin);
+
+            if (longExchange === 'Lighter') {
+                const id = this.lighterService.getMarketId(coin);
+                if (id === null) {
+                    return onUpdate(`❌ Ошибка: Не удалось найти Market ID для ${coin} на Lighter`);
+                }
+                longSymbol = id.toString(); // Превращаем число 0 в строку "0"
+            }
+
+            if (shortExchange === 'Lighter') {
+                const id = this.lighterService.getMarketId(coin);
+                if (id === null) {
+                    return onUpdate(`❌ Ошибка: Не удалось найти Market ID для ${coin} на Lighter`);
+                }
+                shortSymbol = id.toString(); // Превращаем число 0 в строку "0"
+            }
 
             const longTicker = this.getTickerService(longExchange);
             const shortTicker = this.getTickerService(shortExchange);
 
+            console.log(`🔍 [Debug] Subscribing Long (${longExchange}): ${longSymbol}`);
+            console.log(`🔍 [Debug] Subscribing Short (${shortExchange}): ${shortSymbol}`);
+
             await Promise.all([
-                longTicker.start(longSymbol, (_: string, ask: string) => { currentLongAsk = parseFloat(ask); }),
-                shortTicker.start(shortSymbol, (bid: string, _: string) => { currentShortBid = parseFloat(bid); })
+                longTicker.start(longSymbol, (_: string, ask: string) => {
+                    // console.log(`📉 Long Price Update: ${ask}`); // Раскомментируй если совсем тишина
+                    currentLongAsk = parseFloat(ask);
+                }),
+                shortTicker.start(shortSymbol, (bid: string, _: string) => {
+                    // console.log(`📈 Short Price Update: ${bid}`); // Раскомментируй если совсем тишина
+                    currentShortBid = parseFloat(bid);
+                })
             ]);
 
             this.activeSockets.set(userId, { long: longTicker, short: shortTicker, timeout: null });
@@ -296,6 +332,7 @@ export class AutoTradeService {
             case 'Hyperliquid': return this.hlTicker;
             case 'Paradex': return this.paradexTicker;
             case 'Extended': return this.extendedTicker;
+            case 'Lighter': return this.lighterTicker;
             default: throw new Error(`No ticker for ${exchange}`);
         }
     }

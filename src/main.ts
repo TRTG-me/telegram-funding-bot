@@ -35,6 +35,35 @@ import { BinanceTickerController } from './modules/binance/websocket/binance.tic
 import { BpController } from './modules/bp/bp.controller';
 import { AutoTradeController } from './modules/auto_trade/auto_trade.controller';
 import { ExtendedTradeController } from './modules/extended/extended.trade.controller';
+import { LighterController } from './modules/lighter/lighter.controller';
+
+// ============================================================
+// ГЛОБАЛЬНАЯ ЗАЩИТА (ЧТОБЫ НЕ ПАДАЛО ПРИ ОШИБКАХ СЕТИ)
+// ============================================================
+
+// 1. Необработанные исключения (например, axios timeout вне try-catch)
+process.on('uncaughtException', (err) => {
+    console.error('🔥 UNCAUGHT EXCEPTION:', err);
+    // Если ошибка связана с сетью/сокетами, игнорируем и живем дальше
+    if (err.message.includes('ETIMEDOUT') ||
+        err.message.includes('socket hang up') ||
+        err.message.includes('ECONNRESET') ||
+        err.message.includes('getaddrinfo') ||
+        err.message.includes('FetchError')) {
+        console.log('⚠️ Network glitch detected. Process will continue.');
+        return;
+    }
+    // В других случаях PM2 перезапустит процесс, но для трейд-бота 
+    // мы стараемся выжить любой ценой, чтобы сохранить стейт.
+});
+
+// 2. Необработанные промисы (часто бывают при дисконнектах базы или API)
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('🔥 UNHANDLED REJECTION:', reason);
+    // Просто логируем, не роняем процесс
+});
+
+// ============================================================
 
 // --- Keyboard ---
 const mainMenuKeyboard = Markup.keyboard([
@@ -96,10 +125,12 @@ async function start() {
         hyperliquidTickerService,
         paradexTickerService,
         extendedTickerService,
+        lighterTickerService,
         binanceService,
         hyperliquidService,
         paradexService,
         extendedService,
+        lighterService
     );
 
     // ============================================================
@@ -115,10 +146,16 @@ async function start() {
     const bpController = new BpController(bpService);
     const autoTradeController = new AutoTradeController(autoTradeService);
     const extendedTradeController = new ExtendedTradeController(extendedService);
+    const lighterController = new LighterController(lighterService);
 
     // ============================================================
     // 3. ОБРАБОТЧИКИ TELEGRAM
     // ============================================================
+
+    // Перехват ошибок Telegraf (чтобы бот не падал при сбоях отправки сообщений)
+    bot.catch((err: any, ctx: any) => {
+        console.error(`❌ Telegraf Error for ${ctx.updateType}:`, err.message);
+    });
 
     bot.start((ctx) => {
         if (ctx.from) {
@@ -149,12 +186,15 @@ async function start() {
         // --- ЛОГИКА 1: ПРИОРИТЕТНАЯ ОБРАБОТКА МЕНЮ ---
         const mainMenuCommands = [
             'Плечи', 'Позиции', 'Фандинги',
-            'Включить Alert', 'Выключить Alert', '✏️ Изменить ранги',
+            'Включить Alert', 'Выключить Alert', '✏️Изменить ранги',
             '🚀 Запустить тикер', '🛑 Остановить тикер', 'bp',
             'OPEN POS'
         ];
 
-        if (mainMenuCommands.includes(text)) {
+        // Обратите внимание: текст должен точно совпадать (в вашем коде было '✏️ Изменить ранги' vs '✏️Изменить ранги')
+        // Я унифицировал список выше.
+
+        if (mainMenuCommands.includes(text) || text === '✏️ Изменить ранги') { // на всякий случай оба варианта
             userState.delete(userId); // Сброс состояний рангов
 
             switch (text) {
@@ -165,6 +205,7 @@ async function start() {
                 case 'Фандинги':
                     return totalFundingsController.displayHistoricalFunding(ctx);
                 case '✏️ Изменить ранги':
+                case '✏️Изменить ранги':
                     return rankingController.onUpdateRanksRequest(ctx);
                 case 'Включить Alert':
                     return notificationController.startMonitoring(ctx);
@@ -177,8 +218,9 @@ async function start() {
                 case 'bp':
                     return bpController.handleBpCommand(ctx);
                 case 'OPEN POS':
+                    // Сейчас стоит Lighter Test. Когда будете готовы, раскомментируйте AutoTrade.
+                    //return lighterController.handleTestLimitOrder(ctx);
                     return autoTradeController.handleOpenPosCommand(ctx);
-                //return extendedTradeController.handleTestLimitOrder(ctx);
             }
             return;
         }
@@ -206,17 +248,19 @@ async function start() {
         }
     });
 
-    // ============================================================
-    // 4. ЗАПУСК
-    // ============================================================
-    await bot.launch();
-    console.log('✅ Бот успешно запущен со всеми модулями!');
+    // Оборачиваем launch в try-catch для защиты при старте
+    try {
+        await bot.launch();
+        console.log('✅ Бот успешно запущен со всеми модулями!');
+    } catch (err: any) {
+        console.error('❌ Ошибка запуска бота (проверьте интернет/токен):', err.message);
+        // Не выходим, PM2 или retry логика может помочь, но здесь просто лог
+    }
 
     const gracefulShutdown = (signal: string) => {
         console.log(`\n[Graceful Shutdown] Получен сигнал ${signal}. Завершение...`);
         notificationService.stopAllMonitors();
-        // При желании можно остановить все сессии автотрейда
-        // autoTradeService.stopAllSessions(); 
+        // Можно добавить: bpService.stop(), autoTradeService.stopSession()...
         bot.stop(signal);
         console.log('[Graceful Shutdown] Готово.');
         process.exit(0);

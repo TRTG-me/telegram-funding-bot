@@ -43,9 +43,9 @@ export class ExtendedService {
             this.vaultId = process.env.EXTENDED_VAULTID_TEST || '';
         } else {
             this.apiKey = process.env.EXTENDED_API_KEY || '';
-            this.privateKey = process.env.EXTENDED_PRIVATE_KEY || '';
-            this.publicKey = process.env.EXTENDED_PUBLIC_KEY || '';
-            this.vaultId = process.env.EXTENDED_VAULT_ID || '';
+            this.privateKey = process.env.EXTENDED_STARK_KEY_PRIVATE || '';
+            this.publicKey = process.env.EXTENDED_STARK_KEY_PUBLIC || '';
+            this.vaultId = process.env.EXTENDED_VAULTID || '';
         }
 
         if (!this.apiKey) {
