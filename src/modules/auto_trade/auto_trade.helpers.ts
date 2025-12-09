@@ -3,6 +3,7 @@ import { BinanceService } from '../binance/binance.service';
 import { HyperliquidService } from '../hyperliquid/hyperliquid.service';
 import { ParadexService } from '../paradex/paradex.service';
 import { ExtendedService } from '../extended/extended.service';
+import { LighterService } from '../lighter/lighter.service';
 
 // Описываем интерфейс сервисов
 export interface ITradingServices {
@@ -10,6 +11,7 @@ export interface ITradingServices {
     hl: HyperliquidService;
     paradex: ParadexService;
     extended: ExtendedService;
+    lighter: LighterService;
 }
 
 // --- УТИЛИТЫ ---
@@ -156,6 +158,24 @@ export async function executeTrade(
 
             return { success: true, price: parseFloat(res.sentPrice) };
         }
+        else if (exchange === 'Lighter') {
+            // placeOrder сам внутри делает Polling по txHash
+            // и возвращает { success: true, avgPrice: ..., status: ... }
+            const res = await services.lighter.placeOrder(symbol, side, qty, 'MARKET');
+            console.log('Lighter Order Result:', res);
+            // СТРОГАЯ ПРОВЕРКА (Strict Mode)
+            // Если статус ASSUMED (API 404/Timeout) или цена 0 — считаем это ошибкой для безопасности.
+            if (res.status === 'ASSUMED_FILLED' || res.avgPrice <= 0) {
+                return {
+                    success: false,
+                    error: `Lighter Unverified: ${res.status}. Tx: ${res.txHash}`
+                };
+            }
+
+            // Если статус FILLED или PARTIALLY_FILLED
+            return { success: true, price: res.avgPrice };
+        }
+
 
         return { success: false, error: `Exchange ${exchange} not supported` };
     } catch (e: any) {
@@ -210,6 +230,22 @@ export async function getPositionData(
                 return {
                     size: pos.size,      // Размер
                     price: pos.entryPrice || 0// Цена входа
+                };
+            }
+        }
+        else if (exchange === 'Lighter') {
+            const targetSymbol = await formatSymbol('Lighter', coin);
+
+            // Получаем список всех позиций через сервис
+            const allPositions = await services.lighter.getDetailedPositions();
+
+            // Ищем нужную
+            const pos = allPositions.find(p => p.coin === targetSymbol || p.coin.includes(coin));
+
+            if (pos) {
+                return {
+                    size: pos.size,
+                    price: pos.entryPrice || 0
                 };
             }
         }
