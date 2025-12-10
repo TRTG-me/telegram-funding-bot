@@ -55,20 +55,26 @@ export class LighterClient {
 
     private async _loadMarkets() {
         try {
-            // Запрашиваем ВСЕ ордербуки
             const url = `${this.baseUrl}/api/v1/orderBooks`;
             const res = await axios.get(url);
 
-            // Обрабатываем структуру ответа { order_books: [...] }
             const list = res.data?.order_books || [];
 
             if (list.length > 0) {
-                //console.log(`[LighterClient] Loaded ${list.length} markets.`);
+                let perpCount = 0;
 
                 list.forEach((m: any) => {
-                    const id = parseInt(m.market_id); // 2050, 91...
+                    // ===============================================
+                    // 🔥 ВАЖНО: ФИЛЬТРУЕМ ТОЛЬКО PERP (ФЬЮЧЕРСЫ)
+                    // ===============================================
+                    if (m.market_type !== 'perp') {
+                        return; // Игнорируем Spot и другие типы
+                    }
 
-                    // 1. Сохраняем детали (нужны для decimals при создании ордера)
+                    perpCount++;
+                    const id = parseInt(m.market_id);
+
+                    // 1. Сохраняем детали
                     this.markets[id] = {
                         id: id,
                         symbol: m.symbol,
@@ -78,20 +84,31 @@ export class LighterClient {
                         minQuoteAmount: parseFloat(m.min_quote_amount)
                     };
 
-                    // 2. Создаем карту поиска
-                    const rawSymbol = m.symbol.toUpperCase(); // "ZK/USDC" или "MON"
+                    // 2. Маппинг символов (Только для Perps)
+                    const rawSymbol = m.symbol.toUpperCase();
 
-                    // А. Сохраняем как есть: "ZK/USDC" -> 2050
+                    // А. Сохраняем оригинал: "ETH-USDC" -> 0
                     this.symbolToId.set(rawSymbol, id);
 
-                    // Б. Если есть слэш, сохраняем чистый тикер: "ZK" -> 2050
+                    // Б. Если есть дефис, сохраняем короткое имя: "ETH" -> 0
+                    if (rawSymbol.includes('-')) {
+                        const cleanTicker = rawSymbol.split('-')[0];
+                        this.symbolToId.set(cleanTicker, id);
+                    }
+
+                    // В. Если есть слэш: "ZK/USDC" -> "ZK" -> ID
                     if (rawSymbol.includes('/')) {
                         const cleanTicker = rawSymbol.split('/')[0];
                         this.symbolToId.set(cleanTicker, id);
                     }
 
-                    // В. Если слэша нет (как у "MON"), он уже сохранился в пункте А.
+                    // Г. Спец. маппинг для обернутых токенов (WETH -> ETH)
+                    // Часто на Lighter перп называется "WETH-USDC", а мы пишем "ETH"
+                    if (rawSymbol.startsWith('WETH')) this.symbolToId.set('ETH', id);
+                    if (rawSymbol.startsWith('WBTC')) this.symbolToId.set('BTC', id);
                 });
+
+                // console.log(`[LighterClient] Loaded ${perpCount} PERP markets.`);
             } else {
                 console.warn('[LighterClient] No markets found in API response');
             }

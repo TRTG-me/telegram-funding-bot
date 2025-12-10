@@ -10,7 +10,7 @@ export interface IDetailedPosition {
     side: 'L' | 'S';        // Сторона позиции: L - Long, S - Short
     exchange: string;
     fundingRate: number
-    entryPrice?: number       // Биржа (B для Binance)
+    entryPrice?: number     // Биржа (B для Binance)
 }
 
 export interface IParadexAccountResponse {
@@ -161,10 +161,14 @@ export interface IFullAccountSummaryHyper {
 }
 
 export interface ILighterPosition {
+    market_id: number;
     symbol?: string;
-    position?: string;
-    position_value?: string;
-    sign?: 1 | -1; // 1 для Long, -1 для Short
+    position?: string;       // Размер позиции
+    position_value?: string; // Notional value
+    sign?: 1 | -1;           // 1 = Long, -1 = Short
+    avg_entry_price?: string;
+    unrealized_pnl?: string;
+    // ... остальные поля не критичны для этого метода
 }
 
 export interface ILighterAccount {

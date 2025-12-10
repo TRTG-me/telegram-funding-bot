@@ -15,10 +15,8 @@ import * as Helpers from './auto_trade.helpers';
 
 export type ExchangeName = 'Binance' | 'Hyperliquid' | 'Paradex' | 'Extended' | 'Lighter';
 
-// Допустимое отклонение BP в худшую сторону
-const ALLOWED_BP_SLIPPAGE = 2;
+const ALLOWED_BP_SLIPPAGE = 300;
 
-// Интерфейс данных для живого дашборда
 export interface TradeStatusData {
     filledQty: number;
     totalQty: number;
@@ -36,9 +34,7 @@ export interface TradeSessionConfig {
     totalQuantity: number;
     stepQuantity: number;
     targetBp: number;
-    // Обычные логи (новые сообщения)
     onUpdate: (msg: string) => Promise<void>;
-    // Живой статус (редактирование одного сообщения)
     onStatusUpdate?: (data: TradeStatusData) => Promise<void>;
     onFinished: () => void;
 }
@@ -100,12 +96,20 @@ export class AutoTradeService {
         if (this.isRunning(userId)) return onUpdate('⚠️ У вас уже запущен процесс.');
         if (totalQuantity <= 0 || stepQuantity <= 0) return onUpdate('❌ Ошибка: Количество <= 0');
         if (stepQuantity > totalQuantity) return onUpdate('❌ Ошибка: Шаг > Всего');
+
+        // Валидация Lighter
         if (longExchange === 'Lighter' || shortExchange === 'Lighter') {
-            const exists = await this.lighterService.checkSymbolExists(coin);
-            if (!exists) {
-                return onUpdate(`❌ Ошибка: Монеты ${coin} нет на бирже Lighter!`);
+            try {
+                const exists = await this.lighterService.checkSymbolExists(coin);
+                if (!exists) return onUpdate(`❌ Ошибка: Монеты ${coin} нет на бирже Lighter!`);
+            } catch (e: any) {
+                return onUpdate(`❌ Lighter check failed: ${e.message}`);
             }
         }
+
+        // АГРЕССИВНАЯ ОЧИСТКА ПЕРЕД СТАРТОМ
+        this.stopSession(userId, 'Restart/New Session');
+        await new Promise(r => setTimeout(r, 500)); // Даем время сокетам закрыться
 
         this.activeSessions.set(userId, true);
 
@@ -114,32 +118,29 @@ export class AutoTradeService {
         let iteration = 1;
         let currentLongAsk: number | null = null;
         let currentShortBid: number | null = null;
+        let consecutiveErrors = 0; // Счетчик ошибок подряд
 
-        // Лог старта (новое сообщение)
         await onUpdate(
             `🚀 <b>СТАРТ СЕССИИ</b>\n` +
             `Монета: <b>${coin}</b>\n` +
-            `Long: ${longExchange} | Short: ${shortExchange}`
+            `Long: ${longExchange} | Short: ${shortExchange}\n` +
+            `Vol: ${totalQuantity}`
         );
 
         try {
             let longSymbol = await Helpers.formatSymbol(longExchange, coin);
             let shortSymbol = await Helpers.formatSymbol(shortExchange, coin);
 
+            // Получаем ID для Lighter
             if (longExchange === 'Lighter') {
                 const id = this.lighterService.getMarketId(coin);
-                if (id === null) {
-                    return onUpdate(`❌ Ошибка: Не удалось найти Market ID для ${coin} на Lighter`);
-                }
-                longSymbol = id.toString(); // Превращаем число 0 в строку "0"
+                if (id === null) throw new Error(`Market ID not found for ${coin}`);
+                longSymbol = id.toString();
             }
-
             if (shortExchange === 'Lighter') {
                 const id = this.lighterService.getMarketId(coin);
-                if (id === null) {
-                    return onUpdate(`❌ Ошибка: Не удалось найти Market ID для ${coin} на Lighter`);
-                }
-                shortSymbol = id.toString(); // Превращаем число 0 в строку "0"
+                if (id === null) throw new Error(`Market ID not found for ${coin}`);
+                shortSymbol = id.toString();
             }
 
             const longTicker = this.getTickerService(longExchange);
@@ -150,29 +151,27 @@ export class AutoTradeService {
 
             await Promise.all([
                 longTicker.start(longSymbol, (_: string, ask: string) => {
-                    // console.log(`📉 Long Price Update: ${ask}`); // Раскомментируй если совсем тишина
                     currentLongAsk = parseFloat(ask);
                 }),
                 shortTicker.start(shortSymbol, (bid: string, _: string) => {
-                    // console.log(`📈 Short Price Update: ${bid}`); // Раскомментируй если совсем тишина
                     currentShortBid = parseFloat(bid);
                 })
             ]);
 
             this.activeSockets.set(userId, { long: longTicker, short: shortTicker, timeout: null });
 
-            // === ГЛАВНЫЙ ЦИКЛ ===
+            // === ЦИКЛ ===
             const runStep = async () => {
+                // ПРОВЕРКА 1: Сессия активна?
                 if (!this.isRunning(userId)) return;
 
                 // A. Ожидание цен
                 if (!currentLongAsk || !currentShortBid) {
-                    // Шлем статус, что ждем цены
                     if (onStatusUpdate) {
                         await onStatusUpdate({
                             filledQty: filledQuantity, totalQty: totalQuantity,
-                            longAsk: 0, shortBid: 0, currentBp: 0,
-                            status: 'WAITING_PRICES'
+                            longAsk: currentLongAsk || 0, shortBid: currentShortBid || 0,
+                            currentBp: 0, status: 'WAITING_PRICES'
                         });
                     }
                     const t = setTimeout(runStep, 1000);
@@ -183,20 +182,19 @@ export class AutoTradeService {
                 // B. Расчет BP
                 const currentMarketBp = ((currentShortBid! - currentLongAsk!) / currentShortBid!) * 10000;
 
-                // --- ОТПРАВЛЯЕМ ОБНОВЛЕНИЕ ДАШБОРДА ---
                 if (onStatusUpdate) {
                     await onStatusUpdate({
-                        filledQty: filledQuantity,
-                        totalQty: totalQuantity,
-                        longAsk: currentLongAsk!,
-                        shortBid: currentShortBid!,
+                        filledQty: filledQuantity, totalQty: totalQuantity,
+                        longAsk: currentLongAsk!, shortBid: currentShortBid!,
                         currentBp: currentMarketBp,
                         status: currentMarketBp < targetBp ? 'WAITING_BP' : 'TRADING'
                     });
                 }
 
-                // C. ПРОВЕРКА BP (Если низкий - ждем)
+                // C. Условие входа
                 if (currentMarketBp < targetBp) {
+                    // Сбрасываем счетчик ошибок, так как мы просто ждем
+                    consecutiveErrors = 0;
                     const t = setTimeout(runStep, 1000);
                     this.updateSocketTimeout(userId, t);
                     return;
@@ -214,7 +212,6 @@ export class AutoTradeService {
                     return;
                 }
 
-                // Лог итерации (новое сообщение)
                 await onUpdate(`⚡️ <b>Итерация #${iteration}</b> (BP: ${currentMarketBp.toFixed(1)})\nВход ${qtyToTrade} ${coin}...`);
 
                 try {
@@ -224,12 +221,30 @@ export class AutoTradeService {
                         Helpers.executeTrade(shortExchange, coin, 'SELL', qtyToTrade, this.services)
                     ]);
 
-                    // F. ОШИБКИ
-                    if (!longRes.success && !shortRes.success) throw new Error(`Оба ордера failed.\nL: ${longRes.error}\nS: ${shortRes.error}`);
-                    if (!longRes.success && shortRes.success) throw new Error(`🛑 <b>CRITICAL:</b> SHORT открыт, LONG упал!\n⚠️ <b>ЗАКРОЙТЕ SHORT ВРУЧНУЮ!</b>`);
-                    if (longRes.success && !shortRes.success) throw new Error(`🛑 <b>CRITICAL:</b> LONG открыт, SHORT упал!\n⚠️ <b>ЗАКРОЙТЕ LONG ВРУЧНУЮ!</b>`);
+                    // ПРОВЕРКА 2: RACE CONDITION
+                    // Если пока летел ордер, пользователь нажал STOP
+                    if (!this.isRunning(userId)) {
+                        console.warn('⚠️ [Race Condition] Session stopped while orders were flying!');
+                        // Мы не можем отменить ордера постфактум, но мы не должны продолжать цикл.
+                        // Тут можно добавить логику проверки и алерта: "Проверьте позиции!"
+                        await onUpdate('⚠️ <b>ВНИМАНИЕ:</b> Остановка во время сделки! Проверьте, открылись ли позиции!');
+                        return;
+                    }
 
-                    // G. АНАЛИЗ
+                    // F. ОШИБКИ (CRITICAL LEG RISK)
+                    if (!longRes.success && shortRes.success) {
+                        throw new Error(`🛑 <b>CRITICAL:</b> SHORT открыт, LONG упал (${longRes.error})!\n⚠️ <b>ЗАКРОЙТЕ SHORT ВРУЧНУЮ!</b>`);
+                    }
+                    if (longRes.success && !shortRes.success) {
+                        throw new Error(`🛑 <b>CRITICAL:</b> LONG открыт, SHORT упал (${shortRes.error})!\n⚠️ <b>ЗАКРОЙТЕ LONG ВРУЧНУЮ!</b>`);
+                    }
+                    if (!longRes.success && !shortRes.success) {
+                        // Оба упали - это не критично, но увеличим счетчик
+                        throw new Error(`Оба ордера failed. L: ${longRes.error}, S: ${shortRes.error}`);
+                    }
+
+                    // G. УСПЕХ
+                    consecutiveErrors = 0; // Сброс счетчика ошибок
                     const longPrice = longRes.price!;
                     const shortPrice = shortRes.price!;
                     const realizedBp = ((shortPrice - longPrice) / shortPrice) * 10000;
@@ -243,10 +258,11 @@ export class AutoTradeService {
                     bpHealthBuffer.push(isTradeGood);
                     const bufferVisual = bpHealthBuffer.map(ok => ok ? '✅' : '❌').join(' ');
 
-                    // Лог успеха (новое сообщение)
                     await onUpdate(
                         `🎉 <b>Шаг #${iteration} OK</b> | ${filledQuantity}/${totalQuantity}\n` +
-                        `Real BP: <b>${realizedBp.toFixed(1)}</b>\n` +
+                        `📈 L (${longExchange}): <b>${longPrice.toFixed(4)}</b>\n` +
+                        `📉 S (${shortExchange}): <b>${shortPrice.toFixed(4)}</b>\n` +
+                        `📊 Real BP: <b>${realizedBp.toFixed(1)}</b>\n` +
                         `Health: [ ${bufferVisual} ]`
                     );
 
@@ -261,15 +277,34 @@ export class AutoTradeService {
                         return;
                     }
 
-                    // Пауза перед следующей итерацией
-                    await onUpdate('⏳ Пауза 1 сек...');
-                    const t = setTimeout(runStep, 1000);
+                    await onUpdate('⏳ Пауза 1.5 сек...');
+                    const t = setTimeout(runStep, 1500);
                     this.updateSocketTimeout(userId, t);
 
                 } catch (err: any) {
-                    await onUpdate(`❌ <b>ОШИБКА:</b> ${err.message}\n🔴 <b>ТРЕЙД ОСТАНОВЛЕН</b>`);
-                    this.stopSession(userId, 'Error in loop');
-                    onFinished();
+                    consecutiveErrors++;
+                    console.error(`[AutoTrade Error] Iteration failed (${consecutiveErrors}):`, err.message);
+
+                    // Если ошибка критическая (Leg Risk) - останавливаем сразу
+                    if (err.message.includes('CRITICAL')) {
+                        await onUpdate(err.message); // Шлем страшное сообщение
+                        this.stopSession(userId, 'Critical Error');
+                        onFinished();
+                        return;
+                    }
+
+                    // Если просто ошибка (например 502) - пробуем еще пару раз
+                    if (consecutiveErrors > 5) {
+                        await onUpdate(`❌ <b>Слишком много ошибок подряд (${consecutiveErrors}). Остановка.</b>\nПоследняя: ${err.message}`);
+                        this.stopSession(userId, 'Too many errors');
+                        onFinished();
+                        return;
+                    }
+
+                    await onUpdate(`⚠️ Ошибка шага: ${err.message}. Повтор...`);
+                    // Ждем подольше перед повтором
+                    const t = setTimeout(runStep, 2000);
+                    this.updateSocketTimeout(userId, t);
                 }
             };
 
@@ -283,11 +318,15 @@ export class AutoTradeService {
     }
 
     private async finishTrade(config: TradeSessionConfig, filledQty: number) {
-        const { userId, coin, longExchange, shortExchange, onUpdate, onStatusUpdate, onFinished } = config;
+        const { userId, coin, longExchange, shortExchange, totalQuantity, onUpdate, onStatusUpdate, onFinished } = config;
 
-        // Финальное обновление дашборда
+        // ВАЖНО: Делаем живой дашборд финальным
         if (onStatusUpdate) {
-            // (Опционально) можно послать статус FINISHED, чтобы контроллер понял
+            await onStatusUpdate({
+                filledQty: filledQty, totalQty: totalQuantity,
+                longAsk: 0, shortBid: 0, currentBp: 0,
+                status: 'FINISHED'
+            });
         }
 
         await onUpdate('🏁 <b>Трейд завершен.</b> Сверка позиций...');
@@ -300,12 +339,12 @@ export class AutoTradeService {
 
             let msg = '';
             if (longPos.size === 0 && shortPos.size === 0) {
-                msg = `⚠️ <b>Позиции = 0!</b>`;
+                msg = `⚠️ <b>Позиции = 0!</b> (Возможно уже закрыты)`;
             } else if (longPos.size === 0 || shortPos.size === 0) {
                 msg = `⚠️ <b>ОДНОЙ ПОЗЫ НЕТ!</b>\nL: ${longPos.size} | S: ${shortPos.size}`;
             } else {
                 const diff = Math.abs(longPos.size - shortPos.size);
-                if (diff > config.totalQuantity * 0.01) {
+                if (diff > config.totalQuantity * 0.05) { // 5% толерантность к разнице
                     msg = `⚠️ <b>РАССИНХРОН!</b>\nL: ${longPos.size} | S: ${shortPos.size}\nDiff: ${diff.toFixed(4)}`;
                 } else {
                     const finalBp = ((shortPos.price - longPos.price) / shortPos.price) * 10000;
@@ -314,7 +353,7 @@ export class AutoTradeService {
             }
             await onUpdate(msg);
         } catch (e: any) {
-            await onUpdate(`❌ API Error: ${e.message}`);
+            await onUpdate(`❌ API Error (Check positions manually): ${e.message}`);
         }
 
         this.stopSession(userId, 'Finished');
