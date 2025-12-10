@@ -1,4 +1,3 @@
-// ВАШИ РАБОЧИЕ ИМПОРТЫ ОСТАЮТСЯ БЕЗ ИЗМЕНЕНИЙ
 import {
     DerivativesTradingUsdsFutures,
     DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL
@@ -9,7 +8,10 @@ type PriceUpdateCallback = (bid: string, ask: string) => void;
 
 export class BinanceTickerService {
     private client: DerivativesTradingUsdsFutures;
-    private connection: any = null; // Используем 'any' для объекта соединения
+    private connection: any = null;
+
+    // Храним активный символ для фильтрации "чужих" пакетов
+    private activeSymbol: string | null = null;
 
     constructor() {
         this.client = new DerivativesTradingUsdsFutures({
@@ -20,15 +22,18 @@ export class BinanceTickerService {
     }
 
     /**
-     * Запускает WebSocket-поток и возвращает Promise, который
-     * разрешается при успехе или отклоняется при ошибке.
+     * Запускает WebSocket-поток и возвращает Promise
      */
     public start(symbol: string, callback: PriceUpdateCallback): Promise<void> {
-        // --- ГЛАВНОЕ ИЗМЕНЕНИЕ: Оборачиваем всю логику в Promise ---
+        // 1. Запоминаем текущий активный символ (в верхнем регистре, т.к. Binance шлет так)
+        this.activeSymbol = symbol.toUpperCase();
+
         return new Promise(async (resolve, reject) => {
             if (this.connection) {
                 console.warn('Binance WebSocket connection is already active.');
-                resolve(); // Если уже подключено, считаем это успехом.
+                // Даже если соединение активно, мы обновили activeSymbol выше,
+                // поэтому фильтр начнет пропускать только новую монету (если подписка обновилась).
+                resolve();
                 return;
             }
 
@@ -44,6 +49,13 @@ export class BinanceTickerService {
                 });
 
                 stream.on('message', (data: any) => {
+                    // === ФИЛЬТРАЦИЯ (Race Condition Fix) ===
+                    // Binance в поле 's' присылает символ (например "BTCUSDT").
+                    // Если пришел пакет не для той монеты, которую мы сейчас ждем — игнорируем.
+                    if (data.s && data.s.toUpperCase() !== this.activeSymbol) {
+                        return;
+                    }
+
                     if (data && data.b && data.b.length > 0 && data.a && data.a.length > 0) {
                         const bestBid = data.b[0][0];
                         const bestAsk = data.a[0][0];
@@ -51,26 +63,24 @@ export class BinanceTickerService {
                     }
                 });
 
-                // Добавляем обработчик неожиданного закрытия для надежности
                 this.connection.on('close', (code: number) => {
-                    if (code !== 1000) { // 1000 - это нормальное закрытие через .stop()
+                    // Сбрасываем активный символ при разрыве
+                    this.activeSymbol = null;
+
+                    if (code !== 1000) {
                         console.error(`Binance WebSocket disconnected unexpectedly with code: ${code}`);
                         this.connection = null;
-                        // Отклоняем Promise, если соединение было прервано
                         reject(new Error(`Binance disconnected unexpectedly with code: ${code}`));
                     }
                 });
 
                 console.log(`Subscribed to partial book depth stream for ${symbol}.`);
-                // --- СООБЩАЕМ ОБ УСПЕХЕ ---
-                // Promise разрешается после успешного подключения и подписки.
                 resolve();
 
             } catch (error) {
                 console.error('Failed to start Binance WebSocket stream:', error);
                 this.connection = null;
-                // --- СООБЩАЕМ О ПРОВАЛЕ ---
-                // Promise отклоняется, если произошла ошибка при подключении.
+                this.activeSymbol = null;
                 reject(error);
             }
         });
@@ -80,10 +90,12 @@ export class BinanceTickerService {
      * Останавливает и отключает WebSocket-поток.
      */
     public async stop(): Promise<void> {
+        // Сбрасываем символ, чтобы даже если прилетят остаточные пакеты, они не прошли фильтр
+        this.activeSymbol = null;
+
         if (this.connection && typeof this.connection.disconnect === 'function') {
             console.log('Disconnecting from Binance WebSocket...');
             try {
-                // Устанавливаем код 1000 для нормального закрытия
                 await this.connection.disconnect(1000);
                 console.log('Binance WebSocket disconnected successfully.');
             } catch (error) {
@@ -91,9 +103,6 @@ export class BinanceTickerService {
             } finally {
                 this.connection = null;
             }
-        } else {
-            // Убираем вывод в консоль, чтобы не было спама, если сервис не был активен
-            // console.warn('Attempted to stop a non-existent Binance WebSocket connection.');
         }
     }
 }

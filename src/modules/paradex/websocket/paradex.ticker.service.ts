@@ -6,20 +6,22 @@ export class ParadexTickerService {
     private ws: WebSocket | null = null;
     private subscriptionId: number = 1;
 
-    constructor() {
+    // Добавляем переменную для хранения текущего активного символа
+    private activeSymbol: string | null = null;
 
-    }
+    constructor() { }
 
-    /**
-     * Запускает WebSocket-поток и возвращает Promise, который
-     * разрешается при успехе или отклоняется при ошибке.
-     */
     public start(symbol: string, callback: PriceUpdateCallback): Promise<void> {
-        // --- ГЛАВНОЕ ИЗМЕНЕНИЕ: Оборачиваем всю логику в Promise ---
+        // Запоминаем, на что мы подписываемся (например, "BTC-USD-PERP")
+        this.activeSymbol = symbol;
+
         return new Promise((resolve, reject) => {
             if (this.ws) {
-                console.warn('Paradex WebSocket connection is already active.');
-                resolve(); // Если уже подключено, считаем это успехом.
+                console.warn('Paradex WebSocket connection is already active. Re-subscribing...');
+                // Если сокет уже есть, просто шлем новую подписку, но не пересоздаем сокет
+                // Это лучше, чем просто игнорировать
+                this.subscribe(symbol);
+                resolve();
                 return;
             }
 
@@ -29,46 +31,46 @@ export class ParadexTickerService {
 
             currentConnection.on('open', () => {
                 console.log(`Connected to Paradex WebSocket for ${symbol}.`);
-                const subscriptionMessage = {
-                    jsonrpc: "2.0",
-                    method: "subscribe",
-                    params: { channel: `bbo.${symbol}` },
-                    id: this.subscriptionId++
-                };
-                currentConnection.send(JSON.stringify(subscriptionMessage));
-                console.log('Paradex subscription message sent:', JSON.stringify(subscriptionMessage));
-
-                // --- СООБЩАЕМ ОБ УСПЕХЕ ---
-                // Promise разрешается после успешного открытия и отправки подписки.
+                this.subscribe(symbol);
                 resolve();
             });
 
             currentConnection.on('error', (error) => {
                 console.error('Paradex WebSocket error:', error);
-                this.ws = null;
-                // --- СООБЩАЕМ О ПРОВАЛЕ ---
+                // Не обнуляем ws тут, чтобы close сработал и почистил всё
                 reject(error);
             });
 
             currentConnection.on('close', (code, reason) => {
                 console.log(`Paradex WebSocket disconnected: ${code} - ${reason.toString()}`);
-                if (code !== 1000) { // 1000 - это нормальное закрытие через .stop()
-                    // --- СООБЩАЕМ О ПРОВАЛЕ ---
-                    reject(new Error(`Paradex disconnected unexpectedly: ${code}`));
-                }
                 this.ws = null;
+                this.activeSymbol = null; // Сбрасываем символ при отключении
             });
 
-            // Обработчик сообщений остается без изменений
             currentConnection.on('message', (data: WebSocket.Data) => {
                 try {
                     const message = JSON.parse(data.toString());
-                    if (message.method === 'subscription' && message.params && message.params.data) {
-                        const priceData = message.params.data;
-                        const bestBid = priceData.bid;
-                        const bestAsk = priceData.ask;
-                        if (bestBid && bestAsk) {
-                            callback(bestBid, bestAsk);
+
+                    // Проверяем, что это сообщение подписки
+                    if (message.method === 'subscription' && message.params) {
+
+                        // === ФИЛЬТРАЦИЯ (ГЛАВНОЕ ИСПРАВЛЕНИЕ) ===
+                        // Paradex присылает channel в формате "bbo.BTC-USD-PERP"
+                        const incomingChannel = message.params.channel;
+                        const expectedChannel = `bbo.${this.activeSymbol}`;
+
+                        // Если данные пришли не по той монете, которую мы сейчас мониторим - ИГНОРИРУЕМ
+                        if (incomingChannel !== expectedChannel) {
+                            return;
+                        }
+
+                        if (message.params.data) {
+                            const priceData = message.params.data;
+                            const bestBid = priceData.bid;
+                            const bestAsk = priceData.ask;
+                            if (bestBid && bestAsk) {
+                                callback(bestBid, bestAsk);
+                            }
                         }
                     }
                 } catch (error) {
@@ -78,23 +80,40 @@ export class ParadexTickerService {
         });
     }
 
+    // Вынес логику отправки сообщения в отдельный метод
+    private subscribe(symbol: string) {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+        const subscriptionMessage = {
+            jsonrpc: "2.0",
+            method: "subscribe",
+            params: { channel: `bbo.${symbol}` },
+            id: this.subscriptionId++
+        };
+        this.ws.send(JSON.stringify(subscriptionMessage));
+        // console.log('Paradex subscription sent:', symbol);
+    }
+
     public stop(): void {
         if (this.ws) {
             console.log('Disconnecting from Paradex WebSocket...');
-            // Отправляем сообщение об отписке перед закрытием
-            const unsubscribeMessage = {
-                jsonrpc: "2.0",
-                method: "unsubscribe_all",
-                params: {},
-                id: this.subscriptionId++
-            };
-            this.ws.send(JSON.stringify(unsubscribeMessage));
 
-            // Указываем код 1000 для "нормального" закрытия соединения
+            // Пытаемся отписаться
+            try {
+                const unsubscribeMessage = {
+                    jsonrpc: "2.0",
+                    method: "unsubscribe_all",
+                    params: {},
+                    id: this.subscriptionId++
+                };
+                this.ws.send(JSON.stringify(unsubscribeMessage));
+            } catch (e) {
+                // Игнорируем ошибки при отправке в закрывающийся сокет
+            }
+
             this.ws.close(1000, 'Client initiated stop');
             this.ws = null;
-        } else {
-            // console.warn('Attempted to stop a non-existent Paradex WebSocket connection.');
+            this.activeSymbol = null;
         }
     }
 }
