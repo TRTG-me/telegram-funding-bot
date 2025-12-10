@@ -33,8 +33,11 @@ export class ExtendedService {
         this.apiUrl = this.isTestnet
             ? 'https://api.starknet.sepolia.extended.exchange/api/v1' // Testnet
             : 'https://api.starknet.extended.exchange/api/v1';         // Mainnet
-
-        console.log(`${this.isTestnet ? '🟡' : '🟢'} [Extended] Service initialized.`);
+        if (this.isTestnet) {
+            console.log('🟡 [Extended] Initializing in TESTNET mode');
+        } else {
+            console.log('🟢 [Extended] Initializing in MAINNET mode');
+        }
 
         if (this.isTestnet) {
             this.apiKey = process.env.EXTENDED_API_KEY_TEST || '';

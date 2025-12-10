@@ -18,17 +18,32 @@ export class LighterTickerService {
     // Хранилище состояний ордербуков для каждого рынка
     private orderBookStates = new Map<string, OrderBook>();
 
-    constructor() {
+    // Добавляем переменную для хранения текущего активного ID маркета
+    private activeMarketIndex: string | null = null;
 
-    }
+    constructor() { }
 
     public start(marketIndex: string, callback: PriceUpdateCallback): Promise<void> {
         return new Promise((resolve, reject) => {
+            // 1. УПРАВЛЕНИЕ СОЕДИНЕНИЕМ
             if (this.ws) {
-                console.warn('Lighter WebSocket connection is already active.');
-                resolve();
-                return;
+                // Если уже подписаны на ТОТ ЖЕ маркет - всё ок
+                if (this.activeMarketIndex === marketIndex && this.ws.readyState === WebSocket.OPEN) {
+                    console.log(`Lighter WebSocket already connected to market ${marketIndex}.`);
+                    resolve();
+                    return;
+                }
+
+                // Если маркет ДРУГОЙ - закрываем старый сокет
+                console.log(`Switching Lighter from ${this.activeMarketIndex} to ${marketIndex}. Reconnecting...`);
+                this.stop();
             }
+
+            // 2. ЗАПОМИНАЕМ НОВЫЙ МАРКЕТ
+            this.activeMarketIndex = marketIndex;
+
+            // Очищаем старое состояние стакана для нового маркета, чтобы начать с чистого листа
+            this.orderBookStates.delete(marketIndex);
 
             const connectionUrl = 'wss://mainnet.zklighter.elliot.ai/stream';
             const options = {
@@ -42,6 +57,12 @@ export class LighterTickerService {
             const currentConnection = this.ws;
 
             currentConnection.on('open', () => {
+                // Защита: если пока коннектились, уже нажали стоп или сменили монету
+                if (this.activeMarketIndex !== marketIndex) {
+                    currentConnection.close();
+                    return;
+                }
+
                 console.log(`Successfully connected to Lighter WebSocket. Subscribing to market ${marketIndex}...`);
                 const subscriptionMessage = {
                     type: "subscribe",
@@ -53,19 +74,29 @@ export class LighterTickerService {
             currentConnection.on('error', (error) => {
                 console.error('Lighter WebSocket error:', error);
                 this.ws = null;
+                this.activeMarketIndex = null;
                 reject(error);
             });
 
             currentConnection.on('close', (code, reason) => {
                 console.log(`Lighter WebSocket disconnected: ${code} - ${reason.toString()}`);
                 this.orderBookStates.delete(marketIndex);
-                if (code !== 1000) {
-                    reject(new Error(`Lighter disconnected unexpectedly: ${code}`));
+
+                if (this.ws === currentConnection) {
+                    this.ws = null;
+                    this.activeMarketIndex = null;
                 }
-                this.ws = null;
+
+                if (code !== 1000) {
+                    // reject сработает только при ошибке на этапе подключения
+                }
             });
 
             currentConnection.on('message', (data: WebSocket.Data) => {
+                // === ФИЛЬТРАЦИЯ ===
+                // Если данные пришли для старого маркета (гонка данных) - игнорируем
+                if (this.activeMarketIndex !== marketIndex) return;
+
                 try {
                     const message = JSON.parse(data.toString());
                     const messageType = message.type;
@@ -76,21 +107,21 @@ export class LighterTickerService {
                             break;
 
                         case 'subscribed/order_book':
-                            // Это наш первоначальный снимок (snapshot), сохраняем его
-                            console.log(`Received order book snapshot for market ${marketIndex}. Subscription successful.`);
+                            // Первоначальный снимок
+                            console.log(`Received order book snapshot for market ${marketIndex}.`);
                             this.orderBookStates.set(marketIndex, message.order_book);
-                            resolve(); // Сообщаем об успехе только после получения снимка
+                            resolve(); // Успех
                             break;
 
                         case 'update/order_book':
-                            // Это дельта (изменение), применяем ее к нашему состоянию
+                            // Дельта
                             this.handleOrderBookUpdate(marketIndex, message.order_book);
                             break;
                     }
 
+                    // Отправка данных
                     const currentState = this.orderBookStates.get(marketIndex);
                     if (currentState && currentState.bids.length > 0 && currentState.asks.length > 0) {
-                        // Отправляем лучшие цены из ОБНОВЛЕННОГО И ОТСОРТИРОВАННОГО стакана
                         callback(currentState.bids[0].price, currentState.asks[0].price);
                     }
                 } catch (error) {
@@ -100,19 +131,17 @@ export class LighterTickerService {
         });
     }
 
-    // --- ВОЗВРАЩАЕМ ЛОГИКУ ОБРАБОТКИ ДЕЛЬТ ---
     private handleOrderBookUpdate(marketIndex: string, delta: OrderBook): void {
         const currentState = this.orderBookStates.get(marketIndex);
         if (!currentState) {
-            console.error(`Received update for market ${marketIndex}, but no initial state exists.`);
+            // Если пришел апдейт, а снепшота еще нет - игнорируем
             return;
         }
 
-        // Применяем изменения к asks и bids
         this.updateSide(currentState.asks, delta.asks);
         this.updateSide(currentState.bids, delta.bids);
 
-        // **КРИТИЧЕСКИ ВАЖНЫЙ ШАГ**: Пересортировываем стакан после каждого обновления
+        // Пересортировка
         currentState.asks.sort((a, b) => parseFloat(a.price) - parseFloat(b.price)); // Аски по возрастанию
         currentState.bids.sort((a, b) => parseFloat(b.price) - parseFloat(a.price)); // Биды по убыванию
     }
@@ -122,15 +151,12 @@ export class LighterTickerService {
             const index = existingLevels.findIndex(level => level.price === newLevel.price);
 
             if (index !== -1) {
-                // Уровень цен уже существует, обновляем его
                 if (parseFloat(newLevel.size) > 0) {
                     existingLevels[index].size = newLevel.size;
                 } else {
-                    // Если размер 0, удаляем этот уровень цен
                     existingLevels.splice(index, 1);
                 }
             } else if (parseFloat(newLevel.size) > 0) {
-                // Это новый уровень цен, добавляем его
                 existingLevels.push(newLevel);
             }
         }
@@ -139,8 +165,11 @@ export class LighterTickerService {
     public stop(): void {
         if (this.ws) {
             console.log('Disconnecting from Lighter WebSocket...');
+            this.ws.removeAllListeners();
             this.ws.close(1000, 'Client initiated stop');
             this.ws = null;
+            this.activeMarketIndex = null;
+            this.orderBookStates.clear();
         }
     }
 }

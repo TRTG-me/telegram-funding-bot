@@ -4,25 +4,36 @@ type PriceUpdateCallback = (bid: string, ask: string) => void;
 
 export class ExtendedTickerService {
     private ws: WebSocket | null = null;
+    // Добавляем хранение текущего символа
+    private activeSymbol: string | null = null;
 
-    constructor() {
+    constructor() { }
 
-    }
-
-    /**
-     * Запускает WebSocket-поток и возвращает Promise, который
-     * разрешается при успехе или отклоняется при ошибке.
-     */
     public start(symbol: string, callback: PriceUpdateCallback): Promise<void> {
-        // --- ГЛАВНОЕ ИЗМЕНЕНИЕ: Оборачиваем всю логику в Promise ---
         return new Promise((resolve, reject) => {
+            const upperSymbol = symbol.toUpperCase();
+
+            // 1. ПРОВЕРКА: Если сокет есть
             if (this.ws) {
-                console.warn('Extended Exchange WebSocket connection is already active.');
-                resolve(); // Если уже подключено, считаем это успехом.
-                return;
+                // Если мы уже подписаны на ЭТУ ЖЕ монету - всё ок, выходим
+                if (this.activeSymbol === upperSymbol && this.ws.readyState === WebSocket.OPEN) {
+                    console.log(`Extended WebSocket is already connected to ${upperSymbol}.`);
+                    resolve();
+                    return;
+                }
+
+                // Если монета ДРУГАЯ - нужно закрыть старое соединение!
+                console.log(`Switching Extended ticker from ${this.activeSymbol} to ${upperSymbol}. Closing old connection...`);
+                this.stop();
+                // stop() синхронно закрывает и обнуляет this.ws, так что идем дальше создавать новый
             }
 
-            const connectionUrl = `wss://api.starknet.extended.exchange/stream.extended.exchange/v1/orderbooks/${symbol.toUpperCase()}?depth=1`;
+            // 2. ЗАПОМИНАЕМ НОВЫЙ СИМВОЛ
+            this.activeSymbol = upperSymbol;
+
+            // 3. СОЗДАЕМ НОВОЕ ПОДКЛЮЧЕНИЕ
+            // URL зависит от символа, поэтому для новой монеты нужен новый URL
+            const connectionUrl = `wss://api.starknet.extended.exchange/stream.extended.exchange/v1/orderbooks/${upperSymbol}?depth=1`;
             const options = {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'
@@ -34,32 +45,43 @@ export class ExtendedTickerService {
             const currentConnection = this.ws;
 
             currentConnection.on('open', () => {
-                console.log(`Successfully connected to Extended Exchange WebSocket for ${symbol}. Waiting for data...`);
-                // --- СООБЩАЕМ ОБ УСПЕХЕ ---
-                // Promise разрешается после успешного открытия соединения.
+                // Дополнительная проверка на случай гонки (если пока коннектились, уже нажали стоп)
+                if (this.activeSymbol !== upperSymbol) {
+                    currentConnection.close();
+                    return;
+                }
+                console.log(`Successfully connected to Extended Exchange WebSocket for ${upperSymbol}. Waiting for data...`);
                 resolve();
             });
 
             currentConnection.on('error', (error) => {
                 console.error('Extended Exchange WebSocket error:', error);
                 this.ws = null;
-                // --- СООБЩАЕМ О ПРОВАЛЕ ---
-                // Promise отклоняется, если произошла ошибка.
+                this.activeSymbol = null;
                 reject(error);
             });
 
             currentConnection.on('close', (code, reason) => {
                 console.log(`Extended Exchange WebSocket disconnected: ${code} - ${reason.toString()}`);
-                if (code !== 1000) { // 1000 - это нормальное закрытие через .stop()
-                    // --- СООБЩАЕМ О ПРОВАЛЕ ---
-                    // Отклоняем Promise, если соединение было прервано неожиданно.
-                    reject(new Error(`Extended Exchange disconnected unexpectedly: ${code}`));
+                if (code !== 1000) {
+                    // reject сработает только если это произошло ДО resolve (во время подключения)
+                    // после resolve это будет Unhandled Rejection, что не страшно, если есть защита в main.ts
+                    // Но для чистоты можно не реджектить, если уже открыто было.
                 }
-                this.ws = null;
+                // Не обнуляем this.ws здесь жестко, так как stop() делает это сам, 
+                // а это событие может прилететь с задержкой от старого сокета.
+                // Проверяем: это наш текущий сокет закрылся?
+                if (this.ws === currentConnection) {
+                    this.ws = null;
+                    this.activeSymbol = null;
+                }
             });
 
-            // Обработчик сообщений остается без изменений
             currentConnection.on('message', (data: WebSocket.Data) => {
+                // ЗАЩИТА ОТ ГОНКИ ДАННЫХ
+                // Если этот сокет относится к символу, который нам уже не нужен - игнорируем
+                if (this.activeSymbol !== upperSymbol) return;
+
                 try {
                     const message = JSON.parse(data.toString());
                     if (message.type === 'SNAPSHOT' && message.data) {
@@ -82,12 +104,10 @@ export class ExtendedTickerService {
     public stop(): void {
         if (this.ws) {
             console.log('Disconnecting from Extended Exchange WebSocket...');
-            // Указываем код 1000 для "нормального" закрытия соединения
+            this.ws.removeAllListeners(); // Убираем слушатели, чтобы не триггерить 'close' или 'error' после ручного закрытия
             this.ws.close(1000, 'Client initiated stop');
             this.ws = null;
-        } else {
-            // Убираем вывод в консоль, чтобы не было спама, если сервис не был активен
-            // console.warn('Attempted to stop a non-existent Extended Exchange WebSocket connection.');
+            this.activeSymbol = null;
         }
     }
 }

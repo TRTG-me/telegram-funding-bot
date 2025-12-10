@@ -10,7 +10,7 @@ export interface IDetailedPosition {
     side: 'L' | 'S';        // Сторона позиции: L - Long, S - Short
     exchange: string;
     fundingRate: number
-    entryPrice?: number     // Биржа (B для Binance)
+    entryPrice?: number
 }
 
 export interface IParadexAccountResponse {
@@ -27,7 +27,7 @@ export interface IParadexPosition {
     market?: string;
     size?: string;
     side?: 'LONG' | 'SHORT';
-    average_entry_price?: string;
+    average_entry_price_usd?: string;
 }
 
 export interface IParadexPositionsResponse {

@@ -1,7 +1,5 @@
-// src/modules/paradex/paradex.service.ts
-
-import axios from 'axios';
-import { ec, typedData as starkTypedData, TypedData, shortString } from 'starknet';
+import axios, { AxiosRequestConfig } from 'axios';
+import { ec, typedData as starkTypedData, shortString } from 'starknet';
 import { getUnixTime } from 'date-fns';
 import {
     IExchangeData,
@@ -11,8 +9,6 @@ import {
     IAuthRequest,
     IParadexPositionsResponse
 } from '../../common/interfaces';
-
-type UnixTime = number;
 
 export class ParadexService {
     // --- КОНФИГУРАЦИЯ ---
@@ -62,23 +58,52 @@ export class ParadexService {
     }
 
     // =================================================================
-    // АВТОРИЗАЦИЯ
+    // АВТОРИЗАЦИЯ (CORE)
     // =================================================================
 
+    /**
+     * Получает точное время с сервера Paradex.
+     * Это предотвращает ошибки "token expired" или "token used before issued".
+     */
+    private async getServerTime(): Promise<number> {
+        try {
+            // Запрашиваем время у биржи
+            const response = await axios.get(`${this.apiUrl}/system/time`);
+
+            // Paradex обычно возвращает server_time в микросекундах (16 цифр)
+            // Нам нужны секунды для JWT
+            const serverTimeMicro = parseInt(response.data.server_time || response.data.time);
+
+            // Конвертируем в секунды (Unix timestamp)
+            const serverTimeSeconds = Math.floor(serverTimeMicro / 1000);
+
+            return serverTimeSeconds;
+        } catch (error) {
+            console.warn('[Paradex] Failed to fetch server time, falling back to local time.');
+            // Fallback на локальное время, если эндпоинт времени недоступен
+            return getUnixTime(new Date());
+        }
+    }
+
     private async getJwtToken(): Promise<string> {
+        // Если токен есть и он свежий - возвращаем его
         if (this.jwtToken && this.tokenExpiration > Date.now()) {
             return this.jwtToken;
         }
 
         try {
-            const now = new Date();
-            const timestamp = getUnixTime(now);
-            const expiration = getUnixTime(new Date(now.getTime() + this.SEVEN_DAYS_MS));
+            //console.log('[Paradex] Authenticating...');
+
+            // 1. ПОЛУЧАЕМ ВРЕМЯ СЕРВЕРА (Синхронизация)
+            const timestamp = await this.getServerTime();
+
+            // Expiration ставим +7 дней от времени сервера
+            const expiration = timestamp + (6 * 24 * 60 * 60);
 
             const request: IAuthRequest = {
                 method: "POST",
                 path: "/v1/auth",
-                body: "",
+                body: "", // Важно: пустая строка
                 timestamp,
                 expiration
             };
@@ -88,16 +113,11 @@ export class ParadexService {
                 primaryType: "Request",
                 types: {
                     StarkNetDomain: [
-                        { name: "name", type: "felt" },
-                        { name: "chainId", type: "felt" },
-                        { name: "version", type: "felt" }
+                        { name: "name", type: "felt" }, { name: "chainId", type: "felt" }, { name: "version", type: "felt" }
                     ],
                     Request: [
-                        { name: "method", type: "felt" },
-                        { name: "path", type: "felt" },
-                        { name: "body", type: "felt" },
-                        { name: "timestamp", type: "felt" },
-                        { name: "expiration", type: "felt" }
+                        { name: "method", type: "felt" }, { name: "path", type: "felt" }, { name: "body", type: "felt" },
+                        { name: "timestamp", type: "felt" }, { name: "expiration", type: "felt" }
                     ]
                 },
                 message: request,
@@ -115,15 +135,67 @@ export class ParadexService {
                 'PARADEX-SIGNATURE-EXPIRATION': expiration.toString()
             };
 
-            const response = await axios.post(`${this.apiUrl}/auth`, {}, { headers });
+            // Отправляем пустую строку как body
+            const response = await axios.post(`${this.apiUrl}/auth`, "", { headers });
+
+            if (!response.data || !response.data.jwt_token) {
+                throw new Error('No jwt_token in response');
+            }
 
             this.jwtToken = response.data.jwt_token;
-            this.tokenExpiration = Date.now() + this.SEVEN_DAYS_MS - (60 * 60 * 1000);
+            // Обновляем локальное время истечения (с запасом 1 час)
+            this.tokenExpiration = Date.now() + this.SEVEN_DAYS_MS - (3600 * 1000);
 
-            return this.jwtToken!;
+            //console.log('[Paradex] Authenticated successfully.');
+            return this.jwtToken as string;
+
         } catch (error) {
             this.jwtToken = null;
+            this.tokenExpiration = 0;
             throw new Error(`Failed to get JWT token: ${this.getErrorMessage(error)}`);
+        }
+    }
+
+    /**
+     * Обертка для запросов с автоматическим ретраем при 401
+     * Решает проблему "протухшего" токена
+     */
+    private async requestWithRetry<T>(method: 'GET' | 'POST', endpoint: string, data?: any): Promise<T> {
+        let token = await this.getJwtToken();
+
+        const makeCall = async (t: string) => {
+            const config: AxiosRequestConfig = {
+                method,
+                url: `${this.apiUrl}${endpoint}`,
+                headers: {
+                    'Accept': 'application/json',
+                    'Authorization': `Bearer ${t}`
+                },
+                data
+            };
+            return await axios(config);
+        };
+
+        try {
+            const res = await makeCall(token);
+            return res.data;
+        } catch (error: any) {
+            // Если ошибка 401 (Unauthorized) - пробуем обновить токен
+            if (axios.isAxiosError(error) && error.response?.status === 401) {
+                console.warn('[Paradex] 401 Unauthorized. Refreshing token...');
+
+                // Сбрасываем кэш
+                this.jwtToken = null;
+                this.tokenExpiration = 0;
+
+                // Получаем новый токен
+                token = await this.getJwtToken();
+
+                // Повторяем запрос
+                const retryRes = await makeCall(token);
+                return retryRes.data;
+            }
+            throw error;
         }
     }
 
@@ -131,16 +203,9 @@ export class ParadexService {
     // ХЕЛПЕРЫ ДАННЫХ
     // =================================================================
 
-    private async getAccount(jwtToken: string): Promise<IParadexAccountResponse> {
-        const headers = { 'Accept': 'application/json', 'Authorization': `Bearer ${jwtToken}` };
-        const response = await axios.get(`${this.apiUrl}/account`, { headers });
-        return response.data;
-    }
-
-    private async _getOpenPositions(jwtToken: string): Promise<IParadexPosition[]> {
-        const headers = { 'Accept': 'application/json', 'Authorization': `Bearer ${jwtToken}` };
-        const response = await axios.get(`${this.apiUrl}/positions`, { headers });
-        const data = response.data as IParadexPositionsResponse;
+    private async _getOpenPositions(): Promise<IParadexPosition[]> {
+        // Используем requestWithRetry вместо прямого axios
+        const data = await this.requestWithRetry<IParadexPositionsResponse>('GET', '/positions');
         if (!Array.isArray(data?.results)) return [];
         return data.results.filter(p => p.status === 'OPEN');
     }
@@ -158,12 +223,12 @@ export class ParadexService {
 
     public async getDetailedPositions(): Promise<IDetailedPosition[]> {
         try {
-            const token = await this.getJwtToken();
-            const openPositions = await this._getOpenPositions(token);
+            const openPositions = await this._getOpenPositions();
 
             const detailed = await Promise.all(openPositions.map(async (pos) => {
                 if (!pos.market) return null;
                 try {
+                    // Публичные эндпоинты можно дергать без токена
                     const [marketRes, summaryRes] = await Promise.all([
                         axios.get(`${this.apiUrl}/markets?market=${pos.market}`),
                         axios.get(`${this.apiUrl}/markets/summary?market=${pos.market}`)
@@ -173,9 +238,9 @@ export class ParadexService {
                     const marketSummary = summaryRes.data.results[0];
 
                     const size = Math.abs(parseFloat(pos.size || '0'));
-                    const entryPrice = parseFloat(pos.average_entry_price || '0');
+                    const entryPrice = parseFloat(pos.average_entry_price_usd || '0');
                     const notional = this._calculatePositionNotional(pos);
-
+                    console.log(entryPrice, notional)
                     let fundingRate = parseFloat(marketSummary.funding_rate || '0');
                     if (marketDetails?.funding_period_hours) {
                         fundingRate = (fundingRate / marketDetails.funding_period_hours) * 8;
@@ -201,60 +266,49 @@ export class ParadexService {
 
         } catch (err) {
             console.error('Error fetching Paradex positions:', err);
-            throw new Error(`Paradex Positions Failed: ${this.getErrorMessage(err)}`);
+            return [];
         }
     }
 
     public async calculateLeverage(): Promise<IExchangeData> {
         try {
-            const jwtToken = await this.getJwtToken();
-
             const [accountData, openPositions] = await Promise.all([
-                this.getAccount(jwtToken),
-                this._getOpenPositions(jwtToken),
+                this.requestWithRetry<IParadexAccountResponse>('GET', '/account'),
+                this._getOpenPositions(),
             ]);
 
             if (typeof accountData?.account_value !== 'string' || typeof accountData?.maintenance_margin_requirement !== 'string') {
-                throw new Error('Incomplete account data received from Paradex API.');
+                return { leverage: 0, accountEquity: 0 };
             }
 
             const accountValue = parseFloat(accountData.account_value);
             const maintMargin = parseFloat(accountData.maintenance_margin_requirement);
 
-            if (isNaN(accountValue) || isNaN(maintMargin)) {
-                throw new Error('Failed to parse financial data from Paradex API response.');
-            }
+            if (isNaN(accountValue) || isNaN(maintMargin)) return { leverage: 0, accountEquity: 0 };
 
             const totalNotional = openPositions.reduce((sum, p) => sum + this._calculatePositionNotional(p), 0);
 
-            if (totalNotional === 0) {
-                return { leverage: 0, accountEquity: accountValue };
-            }
+            if (totalNotional === 0) return { leverage: 0, accountEquity: accountValue };
 
             const denominator = accountValue - maintMargin;
-            if (denominator === 0) {
-                // Если маржа равна эквити, но есть позы - это риск ликвидации, но математически деление на 0
-                return { leverage: 0, accountEquity: accountValue };
-            }
+            if (denominator <= 0) return { leverage: 0, accountEquity: accountValue };
 
             const leverage = totalNotional / denominator;
-            if (!isFinite(leverage)) {
-                throw new Error('Leverage calculation resulted in a non-finite number.');
-            }
-
             return { leverage, accountEquity: accountValue };
 
         } catch (err) {
-            const message = this.getErrorMessage(err);
-            console.error('Error during Paradex leverage calculation:', err);
-            throw new Error(`Failed to calculate Paradex leverage: ${message}`);
+            return { leverage: 0, accountEquity: 0 };
         }
     }
 
     public async getOpenPosition(symbol: string): Promise<IDetailedPosition | undefined> {
         const paradexSymbol = symbol.endsWith('-USD-PERP') ? symbol : `${symbol}-USD-PERP`;
         const positions = await this.getDetailedPositions();
-        return positions.find(p => p.coin === symbol || p.coin === paradexSymbol || `${p.coin}-USD-PERP` === paradexSymbol);
+        return positions.find(p =>
+            p.coin === symbol ||
+            p.coin === paradexSymbol.replace(/-USD-PERP$/, '') ||
+            `${p.coin}-USD-PERP` === paradexSymbol
+        );
     }
 
     // =================================================================
@@ -273,8 +327,14 @@ export class ParadexService {
         try {
             console.log(`[Paradex ${this.isTestnet ? 'TEST' : 'PROD'}] Placing MARKET ${side} ${quantity} ${symbol}`);
 
-            const token = await this.getJwtToken();
-            const timestamp = Date.now();
+            // Синхронизация времени для подписи ордера
+            const timestamp = await this.getServerTime() * 1000; // API хочет мс, но синхронизированные
+
+            // Если сервер возвращает мс, используем их. Если сек - умножаем.
+            // getServerTime() у нас возвращает СЕКУНДЫ.
+            // Paradex Order Signature хочет МИЛЛИСЕКУНДЫ.
+            // Поэтому timestamp * 1000.
+
             const sizeQuantums = this.toQuantums(quantity);
             const sideFlag = side === 'BUY' ? '1' : '2';
 
@@ -315,18 +375,16 @@ export class ParadexService {
                 signature_timestamp: timestamp
             };
 
-            const response = await axios.post(`${this.apiUrl}/orders`, payload, {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
+            // Отправляем через безопасную обертку
+            const response: any = await this.requestWithRetry('POST', '/orders', payload);
+            const orderId = response.id;
 
-            const orderId = response.data.id;
-
-            // Поллинг
+            // Поллинг статуса
             let attempts = 0;
             while (attempts < 20) {
                 await new Promise(r => setTimeout(r, 500));
 
-                const orderData = await this.getOrder(orderId, token);
+                const orderData: any = await this.requestWithRetry('GET', `/orders/${orderId}`);
                 const status = orderData.status;
 
                 if (status === 'CLOSED') {
@@ -358,23 +416,7 @@ export class ParadexService {
 
         } catch (err: any) {
             console.error('Paradex Trade Error:', err.message);
-            if (axios.isAxiosError(err) && err.response?.data) {
-                const msg = (err.response.data as any).message || JSON.stringify(err.response.data);
-                throw new Error(`Paradex API Error: ${msg}`);
-            }
-            throw new Error(`${err.message}`);
-        }
-    }
-
-    private async getOrder(orderId: string, token: string): Promise<any> {
-        try {
-            const res = await axios.get(`${this.apiUrl}/orders/${orderId}`, {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            return res.data;
-        } catch (e) {
-            console.error('Get Order Error:', e);
-            return {};
+            throw err;
         }
     }
 }

@@ -117,7 +117,8 @@ async function start() {
         hyperliquidTickerService,
         paradexTickerService,
         extendedTickerService,
-        lighterTickerService
+        lighterTickerService,
+        lighterService
     );
 
     const autoTradeService = new AutoTradeService(

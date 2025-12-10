@@ -1,6 +1,4 @@
 import { Context, Markup } from 'telegraf';
-import { Update } from 'telegraf/typings/core/types/typegram';
-// --- ИЗМЕНЕНИЕ 1: Импортируем новый интерфейс BpCalculationData ---
 import { BpService, ExchangeName, BpCalculationData } from './bp.service';
 
 interface BpState {
@@ -31,7 +29,7 @@ export class BpController {
         const currentState = this.userState.get(userId);
 
         if (currentState && currentState.step === 'calculating') {
-            this.stopCalculation(ctx, userId);
+            await this.stopCalculation(ctx, userId);
         } else {
             this.userState.set(userId, { step: 'awaiting_coin' });
             await ctx.reply('Введите символ монеты (например, ETH или BTC):');
@@ -43,17 +41,18 @@ export class BpController {
 
         const userId = ctx.from.id;
         const state = this.userState.get(userId);
+        if (!state) return; // Защита от потери стейта
+
         const coin = ctx.message.text.trim();
 
-        const coinRegex = /^[a-zA-Z]{1,8}$/;
-        if (!coinRegex.test(coin)) {
-            await ctx.reply('Неверный формат. Введите символ монеты, используя только английские буквы (от 1 до 8 символов).');
+        if (!/^[a-zA-Z0-9]{1,10}$/.test(coin)) { // Чуть расширил регулярку для 1000PEPE
+            await ctx.reply('❌ Неверный формат. Введите тикер (например ETH).');
             return;
         }
 
         const upperCoin = coin.toUpperCase();
 
-        if (state && state.step === 'awaiting_coin') {
+        if (state.step === 'awaiting_coin') {
             state.coin = upperCoin;
             state.step = 'awaiting_long';
 
@@ -67,6 +66,9 @@ export class BpController {
     public async handleCallbackQuery(ctx: Context): Promise<void> {
         if (!ctx.from || !ctx.callbackQuery || !('data' in ctx.callbackQuery)) return;
 
+        // Сразу отвечаем, чтобы убрать часики
+        try { await ctx.answerCbQuery(); } catch { }
+
         const userId = ctx.from.id;
         const state = this.userState.get(userId);
         const data = ctx.callbackQuery.data;
@@ -75,7 +77,10 @@ export class BpController {
 
         const [_, step, exchangeName] = data.split('_');
 
-        await ctx.editMessageReplyMarkup(undefined);
+        // Редактируем сообщение с кнопками, чтобы они пропали
+        try {
+            await ctx.editMessageReplyMarkup(undefined);
+        } catch { }
 
         if (step === 'long' && state.step === 'awaiting_long') {
             state.longExchange = exchangeName as ExchangeName;
@@ -93,7 +98,7 @@ export class BpController {
             state.step = 'calculating';
 
             await ctx.reply(`Выбрана биржа ${exchangeName} для SHORT.`);
-            const initialMessage = await ctx.reply(`⏳ Подключаюсь к биржам для расчета bp по монете ${state.coin}...`);
+            const initialMessage = await ctx.reply(`⏳ <b>Подключение...</b>\nМонета: ${state.coin}`, { parse_mode: 'HTML' });
             state.messageId = initialMessage.message_id;
 
             this.startCalculation(ctx, userId);
@@ -104,23 +109,26 @@ export class BpController {
         const state = this.userState.get(userId);
         if (!state || !state.coin || !state.longExchange || !state.shortExchange || !state.messageId) return;
 
-        // --- ИЗМЕНЕНИЕ 2: onUpdate теперь принимает объект 'data' ---
         const onUpdate = async (data: BpCalculationData | null) => {
             const currentState = this.userState.get(userId);
+            // Если пользователь нажал стоп, но колбэк еще прилетел
             if (!currentState || currentState.step !== 'calculating') return;
 
             const now = Date.now();
+            // Троттлинг 2 сек (Безопасно для ТГ)
             if (currentState.lastUpdateTime && now - currentState.lastUpdateTime < 1000) return;
 
             let text: string;
-            // --- ИЗМЕНЕНИЕ 3: Новая логика форматирования сообщения ---
+
             if (data === null) {
-                text = `*${currentState.coin} BP \\(${currentState.longExchange} / ${currentState.shortExchange}\\)*\n\n_Ожидание данных\\.\\.\\._`;
+                text = `⏳ <b>${currentState.coin} BP</b>\nWaiting for data...`;
             } else {
-                text = `*${currentState.coin} BP \\(${currentState.longExchange} / ${currentState.shortExchange}\\)*\n\n` +
-                    `Long Price \\(ask\\): \`${data.longPrice.toFixed(4)}\`\n` +
-                    `Short Price \\(bid\\): \`${data.shortPrice.toFixed(4)}\`\n` +
-                    `BP: \`${data.bpValue.toFixed(1)}\``;
+                // Красивое форматирование
+                text = `📊 <b>${currentState.coin} BP MONITOR</b>\n\n` +
+                    `📈 Long (${currentState.longExchange}): <b>${data.longPrice.toFixed(4)}</b>\n` +
+                    `📉 Short (${currentState.shortExchange}): <b>${data.shortPrice.toFixed(4)}</b>\n` +
+                    `---------------------------\n` +
+                    `💰 <b>BP: ${data.bpValue.toFixed(2)}</b>`;
             }
 
             if (text === currentState.lastMessageText) return;
@@ -129,27 +137,34 @@ export class BpController {
             currentState.lastUpdateTime = now;
 
             try {
-                await ctx.telegram.editMessageText(userId, currentState.messageId!, undefined, text, { parse_mode: 'MarkdownV2' });
+                await ctx.telegram.editMessageText(userId, currentState.messageId!, undefined, text, { parse_mode: 'HTML' });
             } catch (error: any) {
-                if (error.description !== 'Bad Request: message is not modified') {
-                    console.error('Failed to edit BP message:', error);
+                // Игнорируем стандартные ошибки "не изменилось"
+                if (error.description?.includes('message is not modified')) return;
+
+                // Если сообщение не найдено (юзер удалил), останавливаем расчет
+                if (error.description?.includes('message to edit not found')) {
+                    this.stopCalculation(ctx, userId);
                 }
+
+                console.error('Failed to edit BP message:', error.message);
             }
         };
 
         try {
             await this.bpService.start(state.coin, state.longExchange, state.shortExchange, onUpdate);
         } catch (error) {
-            console.error(`Error caught in controller: ${(error as Error).message}`);
             const errorMessage = (error as Error).message;
-            const escapedErrorMessage = errorMessage.replace(/([-_\[\]()~`>#\+\=\|{}\.!\\])/g, '\\$1');
-            await ctx.telegram.editMessageText(
-                userId,
-                state.messageId,
-                undefined,
-                `❌ *Ошибка*\n\nПричина: *${escapedErrorMessage}*\n\nВозможно, монета *${state.coin}* не поддерживается на этой бирже\\. Расчет остановлен\\.`,
-                { parse_mode: 'MarkdownV2' }
-            );
+            // Пытаемся сообщить об ошибке
+            if (state.messageId) {
+                try {
+                    await ctx.telegram.editMessageText(
+                        userId, state.messageId, undefined,
+                        `❌ <b>Ошибка запуска:</b>\n${errorMessage}`,
+                        { parse_mode: 'HTML' }
+                    );
+                } catch { }
+            }
             this.userState.delete(userId);
         }
     }
@@ -161,12 +176,12 @@ export class BpController {
 
         if (state && state.messageId) {
             try {
-                await ctx.telegram.editMessageText(userId, state.messageId, undefined, '✅ Расчет BP остановлен.');
+                await ctx.telegram.editMessageText(userId, state.messageId, undefined, '🛑 <b>Расчет BP остановлен.</b>', { parse_mode: 'HTML' });
             } catch (e) {
-                await ctx.reply('✅ Расчет BP остановлен.');
+                await ctx.reply('🛑 Расчет BP остановлен.');
             }
         } else {
-            await ctx.reply('✅ Расчет BP остановлен.');
+            await ctx.reply('🛑 Расчет BP остановлен.');
         }
     }
 }
