@@ -106,43 +106,59 @@ export class LighterService {
      */
     public async getDetailedPositions(): Promise<IDetailedPosition[]> {
         try {
-            // --- Шаг 1: Параллельно запрашиваем данные аккаунта и ставки фандинга ---
+            // 1. Запрашиваем данные аккаунта и фандинги параллельно
             const [accountResponse, fundingResponse] = await Promise.all([
                 this.getAccountData(),
                 axios.get<IFundingRatesResponseLighter>(`${this.API_URL}/funding-rates`)
             ]);
 
-            // --- Шаг 2: Проверяем наличие и структуру данных ---
+            // 2. Достаем нужные объекты из ответов
             const account = accountResponse?.accounts?.[0];
             const fundingRates = fundingResponse?.data?.funding_rates;
 
-            if (!account || !Array.isArray(account.positions) || !Array.isArray(fundingRates)) {
-                throw new Error('Incomplete or invalid data received from Lighter API.');
+            // Если аккаунта нет или нет позиций — возвращаем пустой массив
+            if (!account || !account.positions) {
+                return [];
             }
 
-            // --- Шаг 3: Создаем карту для быстрого доступа к ставкам фандинга ---
+            // 3. Создаем карту фандинга (Symbol -> Rate)
             const fundingMap = new Map<string, number>();
-            fundingRates
-                .filter(rate => rate.exchange === 'lighter') // Оставляем только фандинг от самой биржи Lighter
-                .forEach(rate => {
-                    fundingMap.set(rate.symbol, rate.rate);
-                });
+            if (Array.isArray(fundingRates)) {
+                fundingRates
+                    .filter(rate => rate.exchange === 'lighter')
+                    .forEach(rate => fundingMap.set(rate.symbol, rate.rate));
+            }
 
-            // --- Шаг 4: Фильтруем и преобразуем открытые позиции ---
+            // 4. Маппинг позиций
             const detailedPositions: IDetailedPosition[] = account.positions
-                .filter(p => parseFloat(p.position || '0') !== 0) // Оставляем только открытые
+                // Фильтруем: оставляем только те, где размер позиции не 0
+                .filter(p => parseFloat(p.position || '0') !== 0)
                 .map(position => {
-                    const coin = position.symbol!;
-                    // API отдает ставку уже в виде готового числа, умножаем на 100 для получения процентов
+                    // Название монеты (например "MNT", "ETH")
+                    const coin = position.symbol || 'UNKNOWN';
+
+                    // Фандинг (в процентах)
                     const fundingRate = (fundingMap.get(coin) || 0) * 100;
+
+                    // Парсим строковые значения в числа
+                    const rawSize = parseFloat(position.position || '0');
+                    const rawValue = parseFloat(position.position_value || '0');
+
+                    // Lighter отдает цену входа прямо в ответе, используем её!
+                    // Если вдруг поля нет, будет 0.
+                    const entryPrice = parseFloat(position.avg_entry_price || '0');
 
                     return {
                         coin: coin,
-                        notional: Math.abs(parseFloat(position.position_value || '0')).toString(),
-                        size: Math.abs(parseFloat(position.position || '0')),
+                        // Notional (Объем в $) = abs(position_value)
+                        notional: Math.abs(rawValue).toString(),
+                        // Размер в монетах = abs(position)
+                        size: Math.abs(rawSize),
+                        // Направление: 1 = Long, -1 = Short
                         side: position.sign === 1 ? 'L' : 'S',
-                        exchange: 'L', // 'L' для Lighter
+                        exchange: 'L', // Метка биржи Lighter
                         fundingRate: fundingRate,
+                        entryPrice: entryPrice // <--- Точная цена из API
                     };
                 });
 
@@ -151,10 +167,10 @@ export class LighterService {
         } catch (err) {
             const message = this.getErrorMessage(err);
             console.error('Error fetching Lighter detailed positions:', err);
-            throw new Error(`Failed to get detailed positions from Lighter: ${message}`);
+            // Возвращаем пустой массив при ошибке, чтобы не крашить весь дешборд
+            return [];
         }
     }
-
 
     public async calculateLeverage(): Promise<IExchangeData> {
         try {

@@ -10,10 +10,14 @@ interface AutoTradeState {
     stepQty?: number;
     targetBp?: number;
 
-    // Для Дашборда
+    // Дашборд
     statusMessageId?: number;
     lastStatusText?: string;
     lastUpdateTime?: number;
+
+    // Очередь сообщений
+    messageQueue: string[];
+    isProcessingQueue: boolean;
 }
 
 const EXCHANGES: ExchangeName[] = ['Binance', 'Hyperliquid', 'Paradex', 'Extended', 'Lighter'];
@@ -34,6 +38,45 @@ export class AutoTradeController {
         return !!state && state.step !== 'running';
     }
 
+    // --- ОЧЕРЕДЬ СООБЩЕНИЙ (Anti-Spam) ---
+    private enqueueMessage(userId: number, text: string, ctx: Context) {
+        const state = this.userStates.get(userId);
+        if (!state) return;
+
+        state.messageQueue.push(text);
+        if (!state.isProcessingQueue) {
+            this.processQueue(userId, ctx);
+        }
+    }
+
+    private async processQueue(userId: number, ctx: Context) {
+        const state = this.userStates.get(userId);
+        if (!state) return;
+
+        state.isProcessingQueue = true;
+
+        while (state.messageQueue.length > 0) {
+            const text = state.messageQueue.shift(); // Берем первое
+            if (text) {
+                try {
+                    await ctx.telegram.sendMessage(userId, text, { parse_mode: 'HTML' });
+                } catch (e: any) {
+                    if (e.description?.includes('Too Many Requests')) {
+                        // Если 429, возвращаем в начало очереди и ждем
+                        state.messageQueue.unshift(text);
+                        await new Promise(r => setTimeout(r, 5000));
+                    }
+                }
+                // Пауза между сообщениями (1 сек)
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        }
+
+        state.isProcessingQueue = false;
+    }
+
+    // --- ОБРАБОТЧИКИ ---
+
     public async handleOpenPosCommand(ctx: Context) {
         if (!ctx.from) return;
         const userId = ctx.from.id;
@@ -43,7 +86,6 @@ export class AutoTradeController {
             const state = this.userStates.get(userId);
             this.autoTradeService.stopSession(userId, 'Остановлено кнопкой OPEN POS');
 
-            // Меняем текст дашборда на СТОП
             if (state && state.statusMessageId) {
                 try {
                     await ctx.telegram.editMessageText(userId, state.statusMessageId, undefined, '🛑 <b>Набор остановлен вручную.</b>', { parse_mode: 'HTML' });
@@ -55,25 +97,26 @@ export class AutoTradeController {
             return;
         }
 
-        // 2. ОТМЕНА ВВОДА
+        // 2. СТАРТ
         if (this.isUserInFlow(userId)) {
             this.userStates.delete(userId);
             await ctx.reply('🚫 <b>Ввод данных отменен.</b>', { parse_mode: 'HTML', ...MAIN_KEYBOARD });
             return;
         }
 
-        // 3. СТАРТ ВВОДА
-        this.userStates.set(userId, { step: 'coin' });
+        this.userStates.set(userId, {
+            step: 'coin',
+            messageQueue: [],
+            isProcessingQueue: false
+        });
         await ctx.reply('\n1️⃣ Введите тикер монеты (например, ETH):', { parse_mode: 'HTML' });
     }
 
-    // --- ОБРАБОТКА ВВОДА ---
     public async handleInput(ctx: Context) {
         if (!ctx.from || !('text' in ctx.message!)) return;
         const text = ctx.message.text.trim();
         const userId = ctx.from.id;
         const state = this.userStates.get(userId);
-
         if (!state) return;
 
         try {
@@ -107,14 +150,14 @@ export class AutoTradeController {
                     break;
             }
         } catch (e) {
-            console.error(e);
             ctx.reply('Ошибка ввода.');
         }
     }
 
-    // --- ОБРАБОТКА CALLBACK ---
     public async handleCallback(ctx: Context) {
         if (!ctx.callbackQuery || !('data' in ctx.callbackQuery)) return;
+        try { await ctx.answerCbQuery(); } catch { }
+
         const data = ctx.callbackQuery.data;
         const userId = ctx.from!.id;
         const state = this.userStates.get(userId);
@@ -130,7 +173,6 @@ export class AutoTradeController {
             await ctx.editMessageText(`Выбрано: Long <b>${state.longEx}</b> | Short <b>${state.shortEx}</b>`, { parse_mode: 'HTML' });
             await ctx.reply(`4️⃣ Введите <b>ОБЩЕЕ</b> количество монет:`, { parse_mode: 'HTML' });
         }
-        await ctx.answerCbQuery();
     }
 
     private getExchangeKeyboard(prefix: string, exclude?: string) {
@@ -144,9 +186,8 @@ export class AutoTradeController {
         const state = this.userStates.get(userId)!;
         state.step = 'running';
 
-        // 1. Отправляем Дашборд (один раз)
         const initMsg = await ctx.reply(
-            `⏳ <b>Подключение к сокетам...</b>\nМонета: ${state.coin}\nTarget BP: ${state.targetBp}`,
+            `⏳ <b>Подключение...</b>`,
             { parse_mode: 'HTML' }
         );
         state.statusMessageId = initMsg.message_id;
@@ -160,36 +201,40 @@ export class AutoTradeController {
             stepQuantity: state.stepQty!,
             targetBp: state.targetBp!,
 
-            // 2. Логи: просто шлем в чат (будут падать под дашборд)
+            // А. Логи (Через очередь)
             onUpdate: async (text) => {
-                try { await ctx.reply(text, { parse_mode: 'HTML' }); } catch { }
+                this.enqueueMessage(userId, text, ctx);
             },
 
-            // 3. Живой статус: редактируем сообщение, созданное в пункте 1
+            // Б. Живой статус
             onStatusUpdate: async (data: TradeStatusData) => {
                 const now = Date.now();
-                // Троттлинг 1 сек (Telegram Limit)
-                if (state.lastUpdateTime && now - state.lastUpdateTime < 1000) return;
+                if (state.lastUpdateTime && now - state.lastUpdateTime < 2500) return; // 2.5 сек
 
                 const text = this.formatDashboard(state, data);
-
                 if (state.statusMessageId && text !== state.lastStatusText) {
                     try {
                         await ctx.telegram.editMessageText(userId, state.statusMessageId, undefined, text, { parse_mode: 'HTML' });
                         state.lastStatusText = text;
                         state.lastUpdateTime = now;
                     } catch (e: any) {
-                        // Игнорируем ошибки (например, если пользователь удалил сообщение)
+                        // Если сообщение удалено пользователем, создаем новое в следующий раз
+                        if (e.description?.includes('not found')) {
+                            state.statusMessageId = undefined;
+                        }
                     }
+                }
+                // Если сообщение было удалено, создаем новое (редкий кейс)
+                else if (!state.statusMessageId) {
+                    const newMsg = await ctx.reply(text, { parse_mode: 'HTML' });
+                    state.statusMessageId = newMsg.message_id;
                 }
             },
 
-            // 4. Финиш
             onFinished: async () => {
-                // Превращаем дашборд в статус "Завершено"
                 if (state.statusMessageId) {
                     try {
-                        await ctx.telegram.editMessageText(userId, state.statusMessageId, undefined, '✅ <b>Сессия завершена (см. отчет ниже)</b>', { parse_mode: 'HTML' });
+                        await ctx.telegram.editMessageText(userId, state.statusMessageId, undefined, '🏁 <b>Сессия завершена.</b>', { parse_mode: 'HTML' });
                     } catch { }
                 }
                 this.userStates.delete(userId);
@@ -197,15 +242,13 @@ export class AutoTradeController {
         });
     }
 
-    // Верстка дашборда
     private formatDashboard(state: AutoTradeState, data?: TradeStatusData): string {
         if (!data) return `⏳ <b>Ожидание данных...</b>`;
-
         let statusText = '';
         if (data.status === 'WAITING_PRICES') statusText = '🟡 Жду цены...';
         else if (data.status === 'WAITING_BP') statusText = '🟠 <b>Жду BP...</b>';
         else if (data.status === 'TRADING') statusText = '🟢 <b>ТОРГОВЛЯ</b>';
-        else statusText = '🔵 Активен';
+        else statusText = '🔵 Завершено';
 
         return `📊 <b>LIVE STATUS</b>\n` +
             `Состояние: ${statusText}\n\n` +
