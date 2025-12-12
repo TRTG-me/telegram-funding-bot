@@ -209,7 +209,7 @@ export class AutoTradeController {
             // Б. Живой статус
             onStatusUpdate: async (data: TradeStatusData) => {
                 const now = Date.now();
-                if (state.lastUpdateTime && now - state.lastUpdateTime < 2500) return; // 2.5 сек
+                if (state.lastUpdateTime && now - state.lastUpdateTime < 1500) return;
 
                 const text = this.formatDashboard(state, data);
                 if (state.statusMessageId && text !== state.lastStatusText) {

@@ -240,7 +240,7 @@ export class ParadexService {
                     const size = Math.abs(parseFloat(pos.size || '0'));
                     const entryPrice = parseFloat(pos.average_entry_price_usd || '0');
                     const notional = this._calculatePositionNotional(pos);
-                    console.log(entryPrice, notional)
+
                     let fundingRate = parseFloat(marketSummary.funding_rate || '0');
                     if (marketDetails?.funding_period_hours) {
                         fundingRate = (fundingRate / marketDetails.funding_period_hours) * 8;
@@ -278,26 +278,27 @@ export class ParadexService {
             ]);
 
             if (typeof accountData?.account_value !== 'string' || typeof accountData?.maintenance_margin_requirement !== 'string') {
-                return { leverage: 0, accountEquity: 0 };
+                return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
             }
 
             const accountValue = parseFloat(accountData.account_value);
             const maintMargin = parseFloat(accountData.maintenance_margin_requirement);
 
-            if (isNaN(accountValue) || isNaN(maintMargin)) return { leverage: 0, accountEquity: 0 };
+
+            if (isNaN(accountValue) || isNaN(maintMargin)) return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
 
             const totalNotional = openPositions.reduce((sum, p) => sum + this._calculatePositionNotional(p), 0);
-
-            if (totalNotional === 0) return { leverage: 0, accountEquity: accountValue };
+            const P_MM_keff = totalNotional ? (maintMargin / totalNotional) : 0;
+            if (totalNotional === 0) return { leverage: 0, accountEquity: accountValue, P_MM_keff };
 
             const denominator = accountValue - maintMargin;
-            if (denominator <= 0) return { leverage: 0, accountEquity: accountValue };
+            if (denominator <= 0) return { leverage: 0, accountEquity: accountValue, P_MM_keff };
 
             const leverage = totalNotional / denominator;
-            return { leverage, accountEquity: accountValue };
+            return { leverage, accountEquity: accountValue, P_MM_keff };
 
         } catch (err) {
-            return { leverage: 0, accountEquity: 0 };
+            return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
         }
     }
 

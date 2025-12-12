@@ -133,21 +133,23 @@ export class ExtendedService {
         try {
             const response = await this.getAccountBalance();
             const data = response?.data;
-            if (!data) return { leverage: 0, accountEquity: 0 };
+            if (!data) return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
 
             const exposure = parseFloat(data.exposure || '0');
             const equity = parseFloat(data.equity || '0');
             const initialMargin = parseFloat(data.initialMargin || '0');
+            const maintMargin = initialMargin / 2;
+            const P_MM_keff = exposure ? (maintMargin / exposure) : 0;
 
-            if (exposure === 0 || equity === 0) return { leverage: 0, accountEquity: equity };
+            if (exposure === 0 || equity === 0) return { leverage: 0, accountEquity: equity, P_MM_keff };
 
-            const denominator = equity - (initialMargin / 2);
-            if (denominator <= 0) return { leverage: 0, accountEquity: equity };
+            const denominator = equity - maintMargin;
+            if (denominator <= 0) return { leverage: 0, accountEquity: equity, P_MM_keff };
 
-            return { leverage: exposure / denominator, accountEquity: equity };
+            return { leverage: exposure / denominator, accountEquity: equity, P_MM_keff };
         } catch (err) {
             console.error('Error calc leverage:', err);
-            return { leverage: 0, accountEquity: 0 };
+            return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
         }
     }
 

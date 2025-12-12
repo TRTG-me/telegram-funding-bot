@@ -24,6 +24,7 @@ import { TotalFundingsService } from './modules/totalFundings/totalFundings.serv
 import { NotificationService } from './modules/notifications/notification.service';
 import { BpService } from './modules/bp/bp.service';
 import { AutoTradeService } from './modules/auto_trade/auto_trade.service';
+import { AutoCloseService } from './modules/auto_close/auto_close.service';
 
 // --- Controllers ---
 import { RankingController } from './modules/ranking/ranking.controller';
@@ -36,6 +37,7 @@ import { BpController } from './modules/bp/bp.controller';
 import { AutoTradeController } from './modules/auto_trade/auto_trade.controller';
 import { ExtendedTradeController } from './modules/extended/extended.trade.controller';
 import { LighterController } from './modules/lighter/lighter.controller';
+import { AutoCloseController } from './modules/auto_close/auto_close.controller';
 
 // ============================================================
 // ГЛОБАЛЬНАЯ ЗАЩИТА (ЧТОБЫ НЕ ПАДАЛО ПРИ ОШИБКАХ СЕТИ)
@@ -133,6 +135,13 @@ async function start() {
         extendedService,
         lighterService
     );
+    const autoCloseService = new AutoCloseService(
+        binanceService,
+        hyperliquidService,
+        paradexService,
+        lighterService,
+        extendedService
+    );
 
     // ============================================================
     // 2. ИНИЦИАЛИЗАЦИЯ КОНТРОЛЛЕРОВ (СЛОЙ ВЗАИМОДЕЙСТВИЯ)
@@ -148,6 +157,7 @@ async function start() {
     const autoTradeController = new AutoTradeController(autoTradeService);
     const extendedTradeController = new ExtendedTradeController(extendedService);
     const lighterController = new LighterController(lighterService);
+    const autoCloseController = new AutoCloseController(autoCloseService);
 
     // ============================================================
     // 3. ОБРАБОТЧИКИ TELEGRAM
@@ -213,15 +223,17 @@ async function start() {
                 case 'Выключить Alert':
                     return notificationController.stopMonitoring(ctx);
                 case '🚀 Запустить тикер':
-                    return binanceTickerController.startTicker(ctx);
+                    //return binanceTickerController.startTicker(ctx);
+                    return autoCloseController.handleManualCheck(ctx);
                 case '🛑 Остановить тикер':
                     return binanceTickerController.stopTicker(ctx);
                 case 'bp':
                     return bpController.handleBpCommand(ctx);
                 case 'OPEN POS':
-                    // Сейчас стоит Lighter Test. Когда будете готовы, раскомментируйте AutoTrade.
-                    //return lighterController.handleTestLimitOrder(ctx);
+                    // Сейчас стоит Lighter Test. Когда будете готовы, раскомментируйте AutoTrade.                   
                     return autoTradeController.handleOpenPosCommand(ctx);
+                //return autoCloseController.handleManualCheck(ctx);
+
             }
             return;
         }
