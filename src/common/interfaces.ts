@@ -1,6 +1,7 @@
 export interface IExchangeData {
     leverage: number;
     accountEquity: number;
+    P_MM_keff: number;
 }
 
 export interface IDetailedPosition {

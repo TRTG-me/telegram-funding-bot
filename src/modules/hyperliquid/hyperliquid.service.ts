@@ -250,6 +250,7 @@ export class HyperliquidService {
             const totalAccountValue = main.val + sec.val;
             const totalNotional = main.ntl + sec.ntl;
             const totalMaintUsed = main.maint + sec.maint;
+            const P_MM_keff = totalNotional ? (totalMaintUsed / totalNotional) : 0;
 
             const denominator = totalAccountValue - totalMaintUsed;
             let leverage = 0;
@@ -259,12 +260,13 @@ export class HyperliquidService {
             }
 
             if (totalAccountValue === 0 && totalNotional === 0 && main.val !== 0) {
-                return { leverage: main.ntl / (main.val - main.maint), accountEquity: main.val };
+                return { leverage: main.ntl / (main.val - main.maint), accountEquity: main.val, P_MM_keff };
             }
 
             return {
                 leverage,
                 accountEquity: totalAccountValue,
+                P_MM_keff,
             };
 
         } catch (err) {

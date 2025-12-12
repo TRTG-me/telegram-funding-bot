@@ -19,12 +19,14 @@ export class SummaryController {
             data.forEach(exchange => {
                 const equity = Math.round(exchange.accountEquity);
                 const leverage = `${exchange.emoji}${exchange.leverage.toFixed(2)}`;
+                const P_MM_keff = exchange.P_MM_keff;
 
                 // --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
                 // Просто оборачиваем содержимое тега <code> в тег <b>
                 messageRows += `<b>${exchange.name}</b>\n`;
                 messageRows += `  Equity:   <b>${equity.toString().padStart(7)}$</b>\n`;
-                messageRows += `  Leverage: <b>${leverage.padStart(7)}x</b>\n\n`;
+                messageRows += `  Leverage: <b>${leverage.padStart(7)}x</b>\n`;
+                messageRows += `  P_MM_keff: <b>${((exchange.P_MM_keff)).toFixed(3).padStart(6)}</b>\n\n`;
             });
 
             const finalMessage = '<b>📊 Сводные данные по биржам:</b>\n\n' + messageRows;

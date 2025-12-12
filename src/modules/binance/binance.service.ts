@@ -68,23 +68,41 @@ export class BinanceService {
     }
 
     private async syncTime() {
-        const start = Date.now();
-        // URL времени выбираем в зависимости от сети
         const url = this.isTestnet
             ? 'https://testnet.binancefuture.com/fapi/v1/time'
             : 'https://fapi.binance.com/fapi/v1/time';
 
-        try {
-            const r = await axios.get(url);
-            const end = Date.now();
-            const serverTime = r.data.serverTime as number;
-            this.lastRttMs = end - start;
-            this.timeOffset = serverTime - end;
-        } catch (e) {
-            console.error('[Binance] Time sync failed:', e);
+        let attempts = 0;
+        const maxAttempts = 10; // Пытаемся 10 раз
+
+        while (attempts < maxAttempts) {
+            try {
+                const start = Date.now(); // Замеряем время конкретного запроса
+                const r = await axios.get(url, { timeout: 5000 }); // Таймаут 5 сек, чтобы не висеть вечно
+                const end = Date.now();
+
+                const serverTime = r.data.serverTime as number;
+                this.lastRttMs = end - start;
+
+                this.timeOffset = serverTime - end;
+
+                // console.log(`[Binance] Time synced. Offset: ${this.timeOffset}ms`);
+                return; // УСПЕХ: выходим из функции
+
+            } catch (e: any) {
+                attempts++;
+                console.warn(`[Binance] Time sync failed (Attempt ${attempts}/${maxAttempts}): ${e.message}`);
+
+                if (attempts === maxAttempts) {
+                    console.error('[Binance] CRITICAL: Time sync failed after all attempts. Trading might fail.');
+                    this.timeOffset = 0; // Сбрасываем в 0, надеемся на точность системных часов
+                } else {
+                    // Ждем 2 секунды перед следующей попыткой
+                    await new Promise(r => setTimeout(r, 2000));
+                }
+            }
         }
     }
-
     private nowMs() {
         return Date.now() + this.timeOffset;
     }
@@ -336,7 +354,7 @@ export class BinanceService {
     }
 
     // 6) Расчёт плеча
-    public async calculateLeverage(): Promise<{ leverage: number; accountEquity: number }> {
+    public async calculateLeverage(): Promise<IExchangeData> {
         try {
             const [accountInfo, positionInfo] = await Promise.all([
                 this.getAccountInfo(),
@@ -363,7 +381,7 @@ export class BinanceService {
             const totalNotional = positionInfo.reduce((sum, position) => {
                 return sum + Math.abs(parseFloat(position.notional || '0'));
             }, 0);
-
+            const P_MM_keff = totalNotional ? (accountMaintMargin / totalNotional) : 0;
             // 4. Считаем плечо
             // Формула: Notional / (Equity - MaintMargin)
             // (Equity - MaintMargin) — это свободная маржа, доступная для потерь до ликвидации (примерно)
@@ -374,9 +392,9 @@ export class BinanceService {
                 // Если маржа меньше поддерживающей, это почти ликвидация или ошибка данных
                 if (totalNotional !== 0) {
                     // Возвращаем высокое плечо или ошибку
-                    return { leverage: 999, accountEquity };
+                    return { leverage: 999, accountEquity, P_MM_keff };
                 }
-                return { leverage: 0, accountEquity };
+                return { leverage: 0, accountEquity, P_MM_keff };
             }
 
             const leverage = totalNotional / denominator;
@@ -385,7 +403,7 @@ export class BinanceService {
                 throw new Error('Calculated leverage resulted in an infinite number.');
             }
 
-            return { leverage, accountEquity };
+            return { leverage, accountEquity, P_MM_keff };
 
         } catch (err) {
             console.error('Error during leverage calculation:', err);

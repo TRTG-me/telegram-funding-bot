@@ -15,7 +15,7 @@ import * as Helpers from './auto_trade.helpers';
 
 export type ExchangeName = 'Binance' | 'Hyperliquid' | 'Paradex' | 'Extended' | 'Lighter';
 
-const ALLOWED_BP_SLIPPAGE = 300;
+const ALLOWED_BP_SLIPPAGE = 3;
 
 export interface TradeStatusData {
     filledQty: number;
@@ -146,8 +146,8 @@ export class AutoTradeService {
             const longTicker = this.getTickerService(longExchange);
             const shortTicker = this.getTickerService(shortExchange);
 
-            console.log(`🔍 [Debug] Subscribing Long (${longExchange}): ${longSymbol}`);
-            console.log(`🔍 [Debug] Subscribing Short (${shortExchange}): ${shortSymbol}`);
+            //console.log(`🔍 [Debug] Subscribing Long (${longExchange}): ${longSymbol}`);
+            // console.log(`🔍 [Debug] Subscribing Short (${shortExchange}): ${shortSymbol}`);
 
             await Promise.all([
                 longTicker.start(longSymbol, (_: string, ask: string) => {
@@ -285,15 +285,23 @@ export class AutoTradeService {
                     consecutiveErrors++;
                     console.error(`[AutoTrade Error] Iteration failed (${consecutiveErrors}):`, err.message);
 
-                    // Если ошибка критическая (Leg Risk) - останавливаем сразу
+                    // 1. Если КРИТИЧЕСКАЯ ошибка (одна нога открылась, вторая нет) -> СТОП БЕЗ ОТЧЕТА (надо руками смотреть)
                     if (err.message.includes('CRITICAL')) {
-                        await onUpdate(err.message); // Шлем страшное сообщение
+                        await onUpdate(err.message);
                         this.stopSession(userId, 'Critical Error');
                         onFinished();
                         return;
                     }
 
-                    // Если просто ошибка (например 502) - пробуем еще пару раз
+                    // 2. [НОВОЕ] Если АВАРИЙНАЯ ОСТАНОВКА (плохой BP) -> ЗАВЕРШАЕМ С ОТЧЕТОМ
+                    if (err.message.includes('АВАРИЙНАЯ ОСТАНОВКА')) {
+                        await onUpdate(`⛔️ <b>${err.message}</b>`); // Пишем сообщение без слова "Повтор"
+                        // Вызываем финиш, чтобы увидеть, что мы успели набрать
+                        await this.finishTrade(config, filledQuantity);
+                        return;
+                    }
+
+                    // 3. Если просто много ошибок подряд
                     if (consecutiveErrors > 5) {
                         await onUpdate(`❌ <b>Слишком много ошибок подряд (${consecutiveErrors}). Остановка.</b>\nПоследняя: ${err.message}`);
                         this.stopSession(userId, 'Too many errors');
@@ -301,8 +309,8 @@ export class AutoTradeService {
                         return;
                     }
 
+                    // 4. Обычная ошибка (сеть, 502 и т.д.) -> ПОВТОР
                     await onUpdate(`⚠️ Ошибка шага: ${err.message}. Повтор...`);
-                    // Ждем подольше перед повтором
                     const t = setTimeout(runStep, 2000);
                     this.updateSocketTimeout(userId, t);
                 }
@@ -348,7 +356,7 @@ export class AutoTradeService {
                     msg = `⚠️ <b>РАССИНХРОН!</b>\nL: ${longPos.size} | S: ${shortPos.size}\nDiff: ${diff.toFixed(4)}`;
                 } else {
                     const finalBp = ((shortPos.price - longPos.price) / shortPos.price) * 10000;
-                    msg = `✅ <b>УСПЕХ!</b>\n📦 ${longPos.size.toFixed(2)} ${coin}\nL: ${longPos.price} | S: ${shortPos.price.toFixed(2)}\n📊 <b>Avg Entry BP: ${finalBp.toFixed(1)}</b>`;
+                    msg = `✅ <b>УСПЕХ!</b>\n📦 ${longPos.size.toFixed(2)} ${coin}\nL: ${longPos.price.toFixed(6)} | S: ${shortPos.price.toFixed(6)}\n📊 <b>Avg Entry BP: ${finalBp.toFixed(1)}</b>`;
                 }
             }
             await onUpdate(msg);

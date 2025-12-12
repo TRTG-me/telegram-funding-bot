@@ -193,10 +193,11 @@ export class LighterService {
                 .reduce((sum, p) => sum + Math.abs(parseFloat(p.position_value || '0')), 0);
 
             if (totalPositionValue === 0) {
-                return { leverage: 0, accountEquity: totalAssetValue };
+                return { leverage: 0, accountEquity: totalAssetValue, P_MM_keff: 0 };
             }
 
             const maintenanceMargin = (totalAssetValue - availableBalance) * 0.6;
+            const P_MM_keff = totalPositionValue ? (maintenanceMargin / totalPositionValue) : 0;
             const denominator = totalAssetValue - maintenanceMargin;
 
             if (denominator <= 0) {
@@ -208,7 +209,7 @@ export class LighterService {
                 throw new Error('Leverage calculation resulted in a non-finite number.');
             }
 
-            return { leverage, accountEquity: totalAssetValue };
+            return { leverage, accountEquity: totalAssetValue, P_MM_keff };
 
         } catch (err) {
             const message = this.getErrorMessage(err);
