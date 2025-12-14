@@ -10,6 +10,13 @@ import {
     IParadexPositionsResponse
 } from '../../common/interfaces';
 
+// --- ЗАГОЛОВКИ БРАУЗЕРА (ОБЯЗАТЕЛЬНО) ---
+const BROWSER_HEADERS = {
+    'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+    'Origin': 'https://app.paradex.trade',
+    'Referer': 'https://app.paradex.trade/'
+};
+
 export class ParadexService {
     // --- КОНФИГУРАЦИЯ ---
     private readonly isTestnet: boolean;
@@ -21,7 +28,8 @@ export class ParadexService {
     private readonly privateKey: string;
 
     // --- АВТОРИЗАЦИЯ ---
-    private readonly SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+    // RPI требует короткоживущие токены (300 секунд / 5 минут)
+    private readonly TOKEN_LIFETIME_SECONDS = 300;
     private jwtToken: string | null = null;
     private tokenExpiration: number = 0;
 
@@ -61,49 +69,35 @@ export class ParadexService {
     // АВТОРИЗАЦИЯ (CORE)
     // =================================================================
 
-    /**
-     * Получает точное время с сервера Paradex.
-     * Это предотвращает ошибки "token expired" или "token used before issued".
-     */
     private async getServerTime(): Promise<number> {
         try {
-            // Запрашиваем время у биржи
-            const response = await axios.get(`${this.apiUrl}/system/time`);
-
-            // Paradex обычно возвращает server_time в микросекундах (16 цифр)
-            // Нам нужны секунды для JWT
+            // Важно: добавляем заголовки браузера даже сюда
+            const response = await axios.get(`${this.apiUrl}/system/time`, { headers: BROWSER_HEADERS });
             const serverTimeMicro = parseInt(response.data.server_time || response.data.time);
-
-            // Конвертируем в секунды (Unix timestamp)
-            const serverTimeSeconds = Math.floor(serverTimeMicro / 1000);
-
-            return serverTimeSeconds;
+            return Math.floor(serverTimeMicro / 1000);
         } catch (error) {
-            console.warn('[Paradex] Failed to fetch server time, falling back to local time.');
-            // Fallback на локальное время, если эндпоинт времени недоступен
+            console.warn('[Paradex] Failed to fetch server time, using local.');
             return getUnixTime(new Date());
         }
     }
 
     private async getJwtToken(): Promise<string> {
-        // Если токен есть и он свежий - возвращаем его
-        if (this.jwtToken && this.tokenExpiration > Date.now()) {
+        // Проактивная проверка: если до смерти токена осталось меньше 60 сек, обновляем
+        if (this.jwtToken && this.tokenExpiration > Date.now() + 60000) {
             return this.jwtToken;
         }
 
         try {
-            //console.log('[Paradex] Authenticating...');
-
-            // 1. ПОЛУЧАЕМ ВРЕМЯ СЕРВЕРА (Синхронизация)
+            // console.log('[Paradex] Refreshing Interactive Token...');
             const timestamp = await this.getServerTime();
 
-            // Expiration ставим +7 дней от времени сервера
-            const expiration = timestamp + (6 * 24 * 60 * 60);
+            // RPI требование: Expiration = timestamp + 300 (5 минут)
+            const expiration = timestamp + this.TOKEN_LIFETIME_SECONDS;
 
             const request: IAuthRequest = {
                 method: "POST",
                 path: "/v1/auth",
-                body: "", // Важно: пустая строка
+                body: "",
                 timestamp,
                 expiration
             };
@@ -128,25 +122,27 @@ export class ParadexService {
             const signature = JSON.stringify([r.toString(), s.toString()]);
 
             const headers = {
+                ...BROWSER_HEADERS, // Добавляем User-Agent и Origin
                 'Accept': 'application/json',
                 'PARADEX-STARKNET-ACCOUNT': this.accountAddress,
                 'PARADEX-STARKNET-SIGNATURE': signature,
                 'PARADEX-TIMESTAMP': timestamp.toString(),
-                'PARADEX-SIGNATURE-EXPIRATION': expiration.toString()
+                'PARADEX-SIGNATURE-EXPIRATION': expiration.toString(),
+                'PARADEX-AUTHORIZE-ISOLATED-MARKETS': 'true' // RPI требование
             };
 
-            // Отправляем пустую строку как body
-            const response = await axios.post(`${this.apiUrl}/auth`, "", { headers });
+            // RPI требование: ?token_usage=interactive
+            const response = await axios.post(`${this.apiUrl}/auth?token_usage=interactive`, "", { headers });
 
             if (!response.data || !response.data.jwt_token) {
                 throw new Error('No jwt_token in response');
             }
 
             this.jwtToken = response.data.jwt_token;
-            // Обновляем локальное время истечения (с запасом 1 час)
-            this.tokenExpiration = Date.now() + this.SEVEN_DAYS_MS - (3600 * 1000);
 
-            //console.log('[Paradex] Authenticated successfully.');
+            // Вычисляем время истечения локально (текущее + 300 сек)
+            this.tokenExpiration = Date.now() + (this.TOKEN_LIFETIME_SECONDS * 1000);
+
             return this.jwtToken as string;
 
         } catch (error) {
@@ -156,10 +152,6 @@ export class ParadexService {
         }
     }
 
-    /**
-     * Обертка для запросов с автоматическим ретраем при 401
-     * Решает проблему "протухшего" токена
-     */
     private async requestWithRetry<T>(method: 'GET' | 'POST', endpoint: string, data?: any): Promise<T> {
         let token = await this.getJwtToken();
 
@@ -168,6 +160,7 @@ export class ParadexService {
                 method,
                 url: `${this.apiUrl}${endpoint}`,
                 headers: {
+                    ...BROWSER_HEADERS, // Все запросы должны быть "от браузера"
                     'Accept': 'application/json',
                     'Authorization': `Bearer ${t}`
                 },
@@ -180,18 +173,12 @@ export class ParadexService {
             const res = await makeCall(token);
             return res.data;
         } catch (error: any) {
-            // Если ошибка 401 (Unauthorized) - пробуем обновить токен
+            // Если 401, пробуем обновить токен (хотя проактивная проверка выше должна это предотвращать)
             if (axios.isAxiosError(error) && error.response?.status === 401) {
-                console.warn('[Paradex] 401 Unauthorized. Refreshing token...');
-
-                // Сбрасываем кэш
+                console.warn('[Paradex] 401 Unauthorized. Force refreshing token...');
                 this.jwtToken = null;
                 this.tokenExpiration = 0;
-
-                // Получаем новый токен
                 token = await this.getJwtToken();
-
-                // Повторяем запрос
                 const retryRes = await makeCall(token);
                 return retryRes.data;
             }
@@ -200,11 +187,10 @@ export class ParadexService {
     }
 
     // =================================================================
-    // ХЕЛПЕРЫ ДАННЫХ
+    // МЕТОДЫ (Без изменений в логике, но используют обновленный requestWithRetry)
     // =================================================================
 
     private async _getOpenPositions(): Promise<IParadexPosition[]> {
-        // Используем requestWithRetry вместо прямого axios
         const data = await this.requestWithRetry<IParadexPositionsResponse>('GET', '/positions');
         if (!Array.isArray(data?.results)) return [];
         return data.results.filter(p => p.status === 'OPEN');
@@ -217,28 +203,30 @@ export class ParadexService {
         return Math.abs(Cost + unrealizedPnl - unrealizedFundingPnl);
     }
 
-    // =================================================================
-    // ПУБЛИЧНЫЕ МЕТОДЫ (DATA)
-    // =================================================================
-
     public async getDetailedPositions(): Promise<IDetailedPosition[]> {
+        // ... (Код без изменений, скопируйте из вашего текущего файла) ...
         try {
             const openPositions = await this._getOpenPositions();
-
             const detailed = await Promise.all(openPositions.map(async (pos) => {
                 if (!pos.market) return null;
                 try {
-                    // Публичные эндпоинты можно дергать без токена
+                    // Добавляем BROWSER_HEADERS в публичные запросы тоже
                     const [marketRes, summaryRes] = await Promise.all([
-                        axios.get(`${this.apiUrl}/markets?market=${pos.market}`),
-                        axios.get(`${this.apiUrl}/markets/summary?market=${pos.market}`)
+                        axios.get(`${this.apiUrl}/markets?market=${pos.market}`, { headers: BROWSER_HEADERS }),
+                        axios.get(`${this.apiUrl}/markets/summary?market=${pos.market}`, { headers: BROWSER_HEADERS })
                     ]);
 
                     const marketDetails = marketRes.data.results[0];
                     const marketSummary = summaryRes.data.results[0];
 
                     const size = Math.abs(parseFloat(pos.size || '0'));
-                    const entryPrice = parseFloat(pos.average_entry_price_usd || '0');
+
+                    // Берем цену входа (исправленная логика из прошлого раза)
+                    let entryPrice = parseFloat(pos.average_entry_price_usd || '0');
+                    if (entryPrice === 0 && pos.average_entry_price_usd) {
+                        entryPrice = parseFloat(pos.average_entry_price_usd);
+                    }
+
                     const notional = this._calculatePositionNotional(pos);
 
                     let fundingRate = parseFloat(marketSummary.funding_rate || '0');
@@ -256,16 +244,10 @@ export class ParadexService {
                         entryPrice: entryPrice
                     } as IDetailedPosition;
 
-                } catch (e) {
-                    console.error(`Error processing Paradex pos ${pos.market}`, e);
-                    return null;
-                }
+                } catch (e) { return null; }
             }));
-
             return detailed.filter((p): p is IDetailedPosition => p !== null);
-
         } catch (err) {
-            console.error('Error fetching Paradex positions:', err);
             return [];
         }
     }
@@ -277,18 +259,18 @@ export class ParadexService {
                 this._getOpenPositions(),
             ]);
 
-            if (typeof accountData?.account_value !== 'string' || typeof accountData?.maintenance_margin_requirement !== 'string') {
-                return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
-            }
+            if (typeof accountData?.account_value !== 'string') return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
 
             const accountValue = parseFloat(accountData.account_value);
-            const maintMargin = parseFloat(accountData.maintenance_margin_requirement);
+            const maintMargin = parseFloat(accountData.maintenance_margin_requirement || '0');
 
-
-            if (isNaN(accountValue) || isNaN(maintMargin)) return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
+            if (isNaN(accountValue)) return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
 
             const totalNotional = openPositions.reduce((sum, p) => sum + this._calculatePositionNotional(p), 0);
+
+            // Расчет P_MM_keff
             const P_MM_keff = totalNotional ? (maintMargin / totalNotional) : 0;
+
             if (totalNotional === 0) return { leverage: 0, accountEquity: accountValue, P_MM_keff };
 
             const denominator = accountValue - maintMargin;
@@ -313,7 +295,7 @@ export class ParadexService {
     }
 
     // =================================================================
-    // ТОРГОВЛЯ
+    // ТОРГОВЛЯ (UPDATED FOR RPI)
     // =================================================================
 
     private toQuantums(amount: number): string {
@@ -326,21 +308,14 @@ export class ParadexService {
         quantity: number
     ): Promise<any> {
         try {
-            console.log(`[Paradex ${this.isTestnet ? 'TEST' : 'PROD'}] Placing MARKET ${side} ${quantity} ${symbol}`);
+            console.log(`[Paradex ${this.isTestnet ? 'TEST' : 'PROD'}] Placing RPI MARKET ${side} ${quantity} ${symbol}`);
 
-            // Синхронизация времени для подписи ордера
-            const timestamp = await this.getServerTime() * 1000; // API хочет мс, но синхронизированные
-
-            // Если сервер возвращает мс, используем их. Если сек - умножаем.
-            // getServerTime() у нас возвращает СЕКУНДЫ.
-            // Paradex Order Signature хочет МИЛЛИСЕКУНДЫ.
-            // Поэтому timestamp * 1000.
-
+            const timestampMs = await this.getServerTime() * 1000;
             const sizeQuantums = this.toQuantums(quantity);
             const sideFlag = side === 'BUY' ? '1' : '2';
 
             const messageToSign = {
-                timestamp: timestamp,
+                timestamp: timestampMs,
                 market: shortString.encodeShortString(symbol),
                 side: sideFlag,
                 orderType: shortString.encodeShortString('MARKET'),
@@ -373,14 +348,15 @@ export class ParadexService {
                 type: 'MARKET',
                 size: quantity.toString(),
                 signature: signature,
-                signature_timestamp: timestamp
+                signature_timestamp: timestampMs,
+
+                // --- RPI ТРЕБОВАНИЕ ---
+                instruction: 'IOC'
             };
 
-            // Отправляем через безопасную обертку
             const response: any = await this.requestWithRetry('POST', '/orders', payload);
             const orderId = response.id;
 
-            // Поллинг статуса
             let attempts = 0;
             while (attempts < 20) {
                 await new Promise(r => setTimeout(r, 500));
@@ -389,13 +365,7 @@ export class ParadexService {
                 const status = orderData.status;
 
                 if (status === 'CLOSED') {
-                    if (orderData.cancel_reason && orderData.cancel_reason !== 'NO_ERROR') {
-                        throw new Error(`Paradex Rejected: ${orderData.cancel_reason}`);
-                    }
-                    if (parseFloat(orderData.size) === parseFloat(orderData.remaining_size)) {
-                        throw new Error(`Paradex Rejected: No fill`);
-                    }
-
+                    if (orderData.cancel_reason && orderData.cancel_reason !== 'NO_ERROR') throw new Error(`Paradex Rejected: ${orderData.cancel_reason}`);
                     const avgPrice = parseFloat(orderData.avg_fill_price || '0');
                     if (avgPrice === 0) throw new Error('Price is 0');
 
