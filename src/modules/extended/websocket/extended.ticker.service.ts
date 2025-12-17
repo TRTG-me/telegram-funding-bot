@@ -11,7 +11,7 @@ export class ExtendedTickerService {
 
     public start(symbol: string, callback: PriceUpdateCallback): Promise<void> {
         return new Promise((resolve, reject) => {
-            const upperSymbol = symbol.toUpperCase();
+            const upperSymbol = symbol
 
             // 1. ПРОВЕРКА: Если сокет есть
             if (this.ws) {

@@ -4,44 +4,47 @@ type PriceUpdateCallback = (bid: string, ask: string) => void;
 
 export class HyperliquidTickerService {
     private ws: WebSocket | null = null;
-    // Добавляем хранение активного символа для фильтрации
+    // Хранение активного символа для фильтрации
     private activeSymbol: string | null = null;
 
     constructor() { }
 
     public start(symbol: string, callback: PriceUpdateCallback): Promise<void> {
         return new Promise((resolve, reject) => {
-            const upperSymbol = symbol.toUpperCase();
+
+            // --- ИСПРАВЛЕНИЕ: Умная нормализация символа ---
+            // 1. Сначала приводим к верхнему регистру для проверки
+            let targetSymbol = symbol
 
             // 1. УПРАВЛЕНИЕ СОЕДИНЕНИЕМ
             if (this.ws) {
                 // Если уже подписаны на ЭТУ ЖЕ монету - всё ок
-                if (this.activeSymbol === upperSymbol && this.ws.readyState === WebSocket.OPEN) {
-                    console.log(`Hyperliquid WebSocket already connected to ${upperSymbol}.`);
+                if (this.activeSymbol === targetSymbol && this.ws.readyState === WebSocket.OPEN) {
+                    console.log(`Hyperliquid WebSocket already connected to ${targetSymbol}.`);
                     resolve();
                     return;
                 }
 
                 // Если монета ДРУГАЯ - закрываем старый сокет
-                console.log(`Switching Hyperliquid from ${this.activeSymbol} to ${upperSymbol}. Reconnecting...`);
+                console.log(`Switching Hyperliquid from ${this.activeSymbol} to ${targetSymbol}. Reconnecting...`);
                 this.stop();
             }
 
-            // 2. ЗАПОМИНАЕМ НОВЫЙ СИМВОЛ
-            this.activeSymbol = upperSymbol;
+            // 2. ЗАПОМИНАЕМ НОВЫЙ СИМВОЛ (уже правильный, например kBONK)
+            this.activeSymbol = targetSymbol;
 
             this.ws = new WebSocket('wss://api.hyperliquid.xyz/ws');
             const currentConnection = this.ws;
 
             currentConnection.on('open', () => {
-                console.log(`Connected to Hyperliquid WebSocket for ${upperSymbol}.`);
+                console.log(`Connected to Hyperliquid WebSocket for ${targetSymbol}.`);
 
-                // Подписываемся на L2 Book для конкретной монеты
+                // Подписываемся на L2 Book
                 const subscriptionMessage = {
                     method: 'subscribe',
                     subscription: {
                         type: 'l2Book',
-                        coin: upperSymbol
+                        coin: targetSymbol // Отправляем kBONK
                     },
                 };
                 currentConnection.send(JSON.stringify(subscriptionMessage));
@@ -57,13 +60,12 @@ export class HyperliquidTickerService {
 
             currentConnection.on('close', (code, reason) => {
                 console.log(`Hyperliquid WebSocket disconnected: ${code} - ${reason.toString()}`);
-                if (code !== 1000) {
-                    // reject сработает, только если ошибка при старте
-                }
-                // Очищаем ссылку, только если это был наш текущий сокет
                 if (this.ws === currentConnection) {
                     this.ws = null;
                     this.activeSymbol = null;
+                }
+                if (code !== 1000) {
+                    // reject сработает только при ошибке старта
                 }
             });
 
@@ -71,13 +73,12 @@ export class HyperliquidTickerService {
                 try {
                     const message = JSON.parse(data.toString());
 
-                    // Проверяем канал
                     if (message.channel === 'l2Book' && message.data) {
                         const bookData = message.data;
 
-                        // === ФИЛЬТРАЦИЯ (ГЛАВНАЯ ЗАЩИТА) ===
-                        // Hyperliquid присылает поле "coin". Сверяем его с тем, что ждем.
-                        // Если прилетели данные от старой монеты - игнорируем.
+                        // === ФИЛЬТРАЦИЯ ===
+                        // Hyperliquid вернет coin: "kBONK".
+                        // Мы сравниваем с this.activeSymbol, который тоже теперь "kBONK".
                         if (bookData.coin !== this.activeSymbol) {
                             return;
                         }
@@ -98,7 +99,7 @@ export class HyperliquidTickerService {
     public stop(): void {
         if (this.ws) {
             console.log('Disconnecting from Hyperliquid WebSocket...');
-            this.ws.removeAllListeners(); // Убираем слушатели для чистоты
+            this.ws.removeAllListeners();
             this.ws.close(1000, 'Client initiated stop');
             this.ws = null;
             this.activeSymbol = null;

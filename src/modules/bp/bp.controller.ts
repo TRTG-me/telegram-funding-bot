@@ -28,12 +28,19 @@ export class BpController {
         const userId = ctx.from.id;
         const currentState = this.userState.get(userId);
 
-        if (currentState && currentState.step === 'calculating') {
+        // ЛОГИКА СБРОСА: Если есть любой стейт (ввод или расчет) — сбрасываем всё
+        if (currentState) {
             await this.stopCalculation(ctx, userId);
-        } else {
-            this.userState.set(userId, { step: 'awaiting_coin' });
-            await ctx.reply('Введите символ монеты (например, ETH или BTC):');
+            // Если мы были на этапе ввода (не расчета), можно отправить сообщение о сбросе
+            if (currentState.step !== 'calculating') {
+                await ctx.reply('🔄 Ввод данных сброшен. Нажмите /bp, чтобы начать заново.');
+            }
+            return;
         }
+
+        // Если стейта нет — начинаем новый флоу
+        this.userState.set(userId, { step: 'awaiting_coin' });
+        await ctx.reply('Введите символ монеты (например, ETH или BTC):');
     }
 
     public async handleCoinInput(ctx: Context): Promise<void> {
@@ -41,11 +48,11 @@ export class BpController {
 
         const userId = ctx.from.id;
         const state = this.userState.get(userId);
-        if (!state) return; // Защита от потери стейта
+        if (!state) return;
 
         const coin = ctx.message.text.trim();
 
-        if (!/^[a-zA-Z0-9]{1,10}$/.test(coin)) { // Чуть расширил регулярку для 1000PEPE
+        if (!/^[a-zA-Z0-9]{1,10}$/.test(coin)) {
             await ctx.reply('❌ Неверный формат. Введите тикер (например ETH).');
             return;
         }
@@ -66,7 +73,6 @@ export class BpController {
     public async handleCallbackQuery(ctx: Context): Promise<void> {
         if (!ctx.from || !ctx.callbackQuery || !('data' in ctx.callbackQuery)) return;
 
-        // Сразу отвечаем, чтобы убрать часики
         try { await ctx.answerCbQuery(); } catch { }
 
         const userId = ctx.from.id;
@@ -77,7 +83,6 @@ export class BpController {
 
         const [_, step, exchangeName] = data.split('_');
 
-        // Редактируем сообщение с кнопками, чтобы они пропали
         try {
             await ctx.editMessageReplyMarkup(undefined);
         } catch { }
@@ -101,6 +106,7 @@ export class BpController {
             const initialMessage = await ctx.reply(`⏳ <b>Подключение...</b>\nМонета: ${state.coin}`, { parse_mode: 'HTML' });
             state.messageId = initialMessage.message_id;
 
+            // Запускаем расчет (без await, чтобы не блокировать хендлер)
             this.startCalculation(ctx, userId);
         }
     }
@@ -111,19 +117,16 @@ export class BpController {
 
         const onUpdate = async (data: BpCalculationData | null) => {
             const currentState = this.userState.get(userId);
-            // Если пользователь нажал стоп, но колбэк еще прилетел
             if (!currentState || currentState.step !== 'calculating') return;
 
             const now = Date.now();
-            // Троттлинг 2 сек (Безопасно для ТГ)
-            if (currentState.lastUpdateTime && now - currentState.lastUpdateTime < 1000) return;
+            if (currentState.lastUpdateTime && now - currentState.lastUpdateTime < 1500) return; // Троттлинг 1.5с
 
             let text: string;
 
             if (data === null) {
                 text = `⏳ <b>${currentState.coin} BP</b>\nWaiting for data...`;
             } else {
-                // Красивое форматирование
                 text = `📊 <b>${currentState.coin} BP MONITOR</b>\n\n` +
                     `📈 Long (${currentState.longExchange}): <b>${data.longPrice.toFixed(4)}</b>\n` +
                     `📉 Short (${currentState.shortExchange}): <b>${data.shortPrice.toFixed(4)}</b>\n` +
@@ -139,15 +142,10 @@ export class BpController {
             try {
                 await ctx.telegram.editMessageText(userId, currentState.messageId!, undefined, text, { parse_mode: 'HTML' });
             } catch (error: any) {
-                // Игнорируем стандартные ошибки "не изменилось"
                 if (error.description?.includes('message is not modified')) return;
-
-                // Если сообщение не найдено (юзер удалил), останавливаем расчет
                 if (error.description?.includes('message to edit not found')) {
                     this.stopCalculation(ctx, userId);
                 }
-
-                console.error('Failed to edit BP message:', error.message);
             }
         };
 
@@ -155,33 +153,48 @@ export class BpController {
             await this.bpService.start(state.coin, state.longExchange, state.shortExchange, onUpdate);
         } catch (error) {
             const errorMessage = (error as Error).message;
-            // Пытаемся сообщить об ошибке
+            // ЛОГИКА ОСТАНОВКИ ПРИ ОШИБКЕ
+            // Если сервис упал (throw из start), мы чистим стейт и пишем ошибку
+
+            // Удаляем стейт, чтобы service.stop() не вызывался дважды (хотя там есть защита)
+            this.userState.delete(userId);
+
             if (state.messageId) {
                 try {
                     await ctx.telegram.editMessageText(
                         userId, state.messageId, undefined,
-                        `❌ <b>Ошибка запуска:</b>\n${errorMessage}`,
+                        `❌ <b>Ошибка запуска:</b>\n${errorMessage}\n\nПопробуйте /bp еще раз.`,
                         { parse_mode: 'HTML' }
                     );
                 } catch { }
             }
-            this.userState.delete(userId);
         }
     }
 
     private async stopCalculation(ctx: Context, userId: number): Promise<void> {
         const state = this.userState.get(userId);
+
+        // 1. Останавливаем сервис (закрываем сокеты)
         this.bpService.stop();
+
+        // 2. Чистим память
         this.userState.delete(userId);
 
-        if (state && state.messageId) {
-            try {
-                await ctx.telegram.editMessageText(userId, state.messageId, undefined, '🛑 <b>Расчет BP остановлен.</b>', { parse_mode: 'HTML' });
-            } catch (e) {
-                await ctx.reply('🛑 Расчет BP остановлен.');
+        // 3. Информируем пользователя
+        if (state) {
+            // Если шел расчет, меняем сообщение монитора
+            if (state.step === 'calculating' && state.messageId) {
+                try {
+                    await ctx.telegram.editMessageText(
+                        userId, state.messageId, undefined,
+                        '🛑 <b>Расчет BP остановлен.</b>',
+                        { parse_mode: 'HTML' }
+                    );
+                } catch (e) {
+                    await ctx.reply('🛑 Расчет BP остановлен.');
+                }
             }
-        } else {
-            await ctx.reply('🛑 Расчет BP остановлен.');
+            // Сообщение "Ввод сброшен" обрабатывается в handleBpCommand для UX
         }
     }
 }

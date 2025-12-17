@@ -9,9 +9,9 @@ import { ITradingServices } from '../auto_trade/auto_trade.helpers';
 import { ExchangeName } from '../auto_trade/auto_trade.service';
 import { IDetailedPosition } from '../../common/interfaces';
 
-const TRIGGER_LEVERAGE = 4.8;
-const TARGET_LEVERAGE = 4.5;
-const ALLOW_UNHEDGED_CLOSE = true;
+const TRIGGER_LEVERAGE = 3.5;   // Порог срабатывания
+const TARGET_LEVERAGE = 3;  // Целевое плечо
+const ALLOW_UNHEDGED_CLOSE = true; // Закрывать ли основу, если хедж не прошел?
 
 @Injectable()
 export class AutoCloseService {
@@ -35,17 +35,45 @@ export class AutoCloseService {
         };
     }
 
+
+    private normalizeToAsset(symbol: string): string {
+        let s = symbol.toUpperCase();
+
+        // 1. Убираем суффиксы
+        s = s.replace(/-USD-PERP$/, '')
+            .replace(/-USD$/, '')
+            .replace(/-PERP$/, '')
+            .replace(/USDT$/, '')
+            .replace(/USDC$/, '');
+
+        // 2. Убираем префиксы (1000, k, K)
+        // Если начинается на 1000 -> убираем
+        if (s.startsWith('1000')) {
+            s = s.substring(4);
+        }
+
+        // Если начинается на K и длина > 3 (чтобы не сломать KDA, но поймать KBONK)
+        // KBONK (5 chars) -> BONK
+        // KDA (3 chars) -> KDA (не трогаем)
+        if (s.startsWith('K') && s.length > 3) {
+            s = s.substring(1);
+        }
+
+        // 3. Обернутые токены
+        if (s === 'WETH') return 'ETH';
+        if (s === 'WBTC') return 'BTC';
+
+        return s;
+    }
+
     private calculateSafeQuantity(amount: number): number {
         const absAmount = Math.abs(amount);
         if (absAmount >= 10) return Math.floor(absAmount);
         else if (absAmount >= 1) return Math.floor(absAmount * 10) / 10;
         else if (absAmount >= 0.1) return Math.floor(absAmount * 100) / 100;
-        else return Math.floor(absAmount * 1000) / 1000;
+        else return Math.floor(absAmount * 100000) / 100000;
     }
 
-    /**
-     * Выполняет задачи с ограничением параллелизма
-     */
     private async runWithConcurrency<T>(tasks: (() => Promise<T>)[], concurrency: number): Promise<T[]> {
         const results: T[] = [];
         const executing: Promise<void>[] = [];
@@ -67,7 +95,7 @@ export class AutoCloseService {
     public async checkAndReduceRisk(): Promise<string[]> {
         const logs: string[] = [];
 
-        // 1. Получаем первичный список бирж и их плечи
+        // 1. Сбор данных
         const exchangeServices: Record<ExchangeName, any> = {
             'Binance': this.binanceService,
             'Hyperliquid': this.hyperliquidService,
@@ -76,8 +104,14 @@ export class AutoCloseService {
             'Extended': this.extendedService
         };
 
-        // Вспомогательная функция для получения данных одной биржи
-        const getLeverageData = async (name: ExchangeName) => {
+        interface ExchangeData {
+            name: ExchangeName;
+            leverage: number;
+            accountEquity: number;
+            P_MM_keff: number;
+        }
+
+        const getLeverageData = async (name: ExchangeName): Promise<ExchangeData> => {
             try {
                 const data = await exchangeServices[name].calculateLeverage();
                 return { name, ...data };
@@ -86,28 +120,22 @@ export class AutoCloseService {
             }
         };
 
-        // Получаем данные всех бирж сразу
         const allData = await Promise.all(Object.keys(exchangeServices).map(name => getLeverageData(name as ExchangeName)));
 
-        // 2. Сортируем опасные биржи
-        let dangerExchanges = allData
+        // 2. Фильтрация
+        const dangerExchanges = allData
             .filter(r => r.leverage >= TRIGGER_LEVERAGE)
             .sort((a, b) => b.leverage - a.leverage);
 
         if (dangerExchanges.length === 0) {
-            return ['✅ Все биржи в безопасности (Leverage < 5)'];
+            return [`✅ Все биржи в безопасности (Leverage &lt; ${TRIGGER_LEVERAGE})`];
         }
 
-        // 3. Обрабатываем ПОСЛЕДОВАТЕЛЬНО (чтобы пересчитывать риски)
-        // Мы не используем Promise.all для бирж, потому что закрытие на одной может изменить ситуацию на другой (если они хеджируют друг друга)
+        // 3. Обработка
         for (const dangerEx of dangerExchanges) {
-
-            // --- RE-CHECK (Проверка актуальности) ---
-            // Получаем свежее плечо перед действием. 
-            // Вдруг пока мы резали первую биржу, эта тоже уменьшилась (если была хеджем)?
             const freshData = await getLeverageData(dangerEx.name);
             if (freshData.leverage < TRIGGER_LEVERAGE) {
-                logs.push(`ℹ️ Skipped ${dangerEx.name}: Leverage dropped to ${freshData.leverage.toFixed(2)} automatically.`);
+                logs.push(`ℹ️ Skipped ${dangerEx.name}: Leverage dropped to ${freshData.leverage.toFixed(2)}.`);
                 continue;
             }
 
@@ -133,7 +161,7 @@ export class AutoCloseService {
                 continue;
             }
 
-            const report = await this.reducePositionsOnExchange(dangerEx.name, alpha, exchangeServices);
+            const report = await this.reducePositionsOnExchange(dangerEx.name, alpha, exchangeServices, allData);
             logs.push(...report);
         }
 
@@ -143,103 +171,133 @@ export class AutoCloseService {
     private async reducePositionsOnExchange(
         exchangeName: ExchangeName,
         alpha: number,
-        allServices: Record<ExchangeName, any>
+        allServices: Record<ExchangeName, any>,
+        allLeverageData: { name: ExchangeName, leverage: number }[]
     ): Promise<string[]> {
         const service = allServices[exchangeName];
 
         try {
             const positions: IDetailedPosition[] = await service.getDetailedPositions();
 
-            // Кэш хедж-позиций (получаем один раз)
             const otherExchanges = Object.keys(allServices).filter(k => k !== exchangeName) as ExchangeName[];
             const allHedgePositions: Record<string, IDetailedPosition[]> = {};
+
             await Promise.all(otherExchanges.map(async (exName) => {
                 try {
                     allHedgePositions[exName] = await allServices[exName].getDetailedPositions();
                 } catch (e) { allHedgePositions[exName] = []; }
             }));
 
-            // --- ПОДГОТОВКА ЗАДАЧ ---
-            // Создаем функции-задачи, но не запускаем их сразу
+            // Сортировка хеджей по плечу (сначала высокие)
+            const sortedHedgeExchanges = Object.keys(allHedgePositions).sort((exA, exB) => {
+                const levA = allLeverageData.find(d => d.name === exA)?.leverage || 0;
+                const levB = allLeverageData.find(d => d.name === exB)?.leverage || 0;
+                return levB - levA;
+            });
+
+            // --- ЗАДАЧИ ---
             const tasks = positions.map(pos => async () => {
                 const localLogs: string[] = [];
 
-                const rawReduceQty = pos.size * alpha;
-                const cleanReduceQty = this.calculateSafeQuantity(rawReduceQty);
+                // 1. Получаем "Чистое" имя актива (например BONK)
+                const targetAsset = this.normalizeToAsset(pos.coin);
 
-                if (cleanReduceQty <= 0) return [];
+                const rawTargetQty = pos.size * alpha;
+
+                let remainingQtyToClose = this.calculateSafeQuantity(rawTargetQty);
+                if (remainingQtyToClose <= 0) return [];
 
                 const closeSide = pos.side === 'L' ? 'SELL' : 'BUY';
-                let hedgeExFound: string | null = null;
-                let hedgeActionExecuted = false;
 
-                // Поиск хеджа
-                for (const [hedgeExName, hedgePosList] of Object.entries(allHedgePositions)) {
-                    const hedgePos = hedgePosList.find(p =>
-                        p.coin === pos.coin || p.coin.includes(pos.coin) || pos.coin.includes(p.coin)
-                    );
+                // --- ПОИСК ХЕДЖА ---
+                for (const hedgeExName of sortedHedgeExchanges) {
+                    if (remainingQtyToClose <= 0) break;
+
+                    const hedgePosList = allHedgePositions[hedgeExName];
+
+                    // Ищем актив с таким же "Чистым" именем
+                    const hedgePos = hedgePosList.find(p => {
+                        return this.normalizeToAsset(p.coin) === targetAsset;
+                    });
 
                     if (hedgePos && hedgePos.side !== pos.side) {
-                        hedgeExFound = hedgeExName;
+                        let qtyForThisHedge = Math.min(remainingQtyToClose, hedgePos.size);
+                        qtyForThisHedge = this.calculateSafeQuantity(qtyForThisHedge);
+
+                        if (qtyForThisHedge <= 0) continue;
+
+                        // Race condition fix
+                        hedgePos.size -= qtyForThisHedge;
+                        if (hedgePos.size < 0) hedgePos.size = 0;
+
                         const hedgeCloseSide = hedgePos.side === 'L' ? 'SELL' : 'BUY';
 
+                        let currentHedgeExecuted = false;
+                        let pendingHedgeLog: string | null = null;
+                        let pendingHedgeError: string | null = null;
+
+                        // Исполнение хеджа
                         try {
                             const res = await Helpers.executeTrade(
                                 hedgeExName as ExchangeName,
                                 hedgePos.coin,
                                 hedgeCloseSide,
-                                cleanReduceQty,
+                                qtyForThisHedge,
                                 this.services
                             );
 
-                            if (res.success) hedgeActionExecuted = true;
-                            else localLogs.push(`⚠️ Hedge fail on ${hedgeExName}: ${res.error}`);
+                            if (res.success) {
+                                currentHedgeExecuted = true;
+                                pendingHedgeLog = `✅ Hedge closed on ${hedgeExName}: ${qtyForThisHedge}`;
+                            } else {
+                                pendingHedgeError = `⚠️ Hedge fail on ${hedgeExName}: ${res.error}`;
+                                hedgePos.size += qtyForThisHedge; // Rollback
+                            }
                         } catch (e: any) {
-                            localLogs.push(`⚠️ Hedge exc error on ${hedgeExName}: ${e.message}`);
+                            pendingHedgeError = `⚠️ Hedge exc error on ${hedgeExName}: ${e.message}`;
+                            hedgePos.size += qtyForThisHedge; // Rollback
                         }
-                        break;
+
+                        // Исполнение основы
+                        if (currentHedgeExecuted || ALLOW_UNHEDGED_CLOSE) {
+                            try {
+                                const mainRes = await Helpers.executeTrade(
+                                    exchangeName,
+                                    pos.coin,
+                                    closeSide,
+                                    qtyForThisHedge,
+                                    this.services
+                                );
+
+                                if (mainRes.success) {
+                                    const exCodeMain = exchangeName.charAt(0);
+                                    const hedgeSymbol = currentHedgeExecuted ? hedgeExName.charAt(0) : 'NO_HEDGE';
+
+                                    localLogs.push(`✂️ <b>${pos.coin} ${exCodeMain}-${hedgeSymbol}</b>: ${qtyForThisHedge}`);
+
+                                    if (pendingHedgeLog) localLogs.push(pendingHedgeLog);
+                                    if (pendingHedgeError) localLogs.push(pendingHedgeError);
+
+                                    remainingQtyToClose -= qtyForThisHedge;
+                                    remainingQtyToClose = this.calculateSafeQuantity(remainingQtyToClose);
+                                } else {
+                                    if (pendingHedgeLog) localLogs.push(pendingHedgeLog);
+                                    if (pendingHedgeError) localLogs.push(pendingHedgeError);
+                                    localLogs.push(`❌ Main Close Fail ${exchangeName} ${pos.coin}: ${mainRes.error}`);
+                                }
+                            } catch (e: any) {
+                                if (pendingHedgeLog) localLogs.push(pendingHedgeLog);
+                                if (pendingHedgeError) localLogs.push(pendingHedgeError);
+                                localLogs.push(`❌ Main Exc Error: ${e.message}`);
+                            }
+                        }
                     }
-                }
-
-                // --- БЕЗОПАСНОСТЬ: ЗАКРЫВАТЬ ЛИ ОСНОВУ, ЕСЛИ ХЕДЖ НЕ ПРОШЕЛ? ---
-                if (!hedgeActionExecuted && hedgeExFound && !ALLOW_UNHEDGED_CLOSE) {
-                    localLogs.push(`⛔️ <b>SKIPPED Main Close ${pos.coin}</b>: Hedge failed, safe mode ON.`);
-                    return localLogs;
-                }
-
-                // Закрытие основы
-                try {
-                    const mainRes = await Helpers.executeTrade(
-                        exchangeName,
-                        pos.coin,
-                        closeSide,
-                        cleanReduceQty,
-                        this.services
-                    );
-
-                    if (mainRes.success) {
-                        const hedgeInfo = hedgeExFound
-                            ? `${hedgeExFound.charAt(0)} (${hedgeActionExecuted ? '✅' : '❌'})`
-                            : 'NO HEDGE ⚠️';
-
-                        const exCodeMain = exchangeName.charAt(0);
-                        localLogs.push(`✂️ <b>${pos.coin} ${exCodeMain}-${hedgeInfo}</b>: ${cleanReduceQty}`);
-                    } else {
-                        localLogs.push(`❌ Main Close Fail ${exchangeName} ${pos.coin}: ${mainRes.error}`);
-                    }
-
-                } catch (e: any) {
-                    localLogs.push(`❌ Main Exc Error: ${e.message}`);
                 }
 
                 return localLogs;
             });
 
-            // --- ЗАПУСК С КОНТРОЛЕМ ПАРАЛЛЕЛЬНОСТИ ---
-
-            // Для L2 бирж (Nonce problem) используем последовательное выполнение (concurrency = 1)
-            // Для CEX (Binance, HL) можно быстрее (concurrency = 3-5)
-
+            // --- ЗАПУСК ---
             const isL2Exchange = ['Lighter', 'Extended', 'Paradex'].includes(exchangeName);
             const concurrency = isL2Exchange ? 1 : 5;
 

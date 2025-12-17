@@ -1,12 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common'; // Добавил Logger
-import axios from 'axios';
+import { Injectable, Logger } from '@nestjs/common';
 import { BinanceTickerService } from '../binance/websocket/binance.ticker.service';
 import { HyperliquidTickerService } from '../hyperliquid/websocket/hyperliquid.ticker.service';
 import { ParadexTickerService } from '../paradex/websocket/paradex.ticker.service';
 import { ExtendedTickerService } from '../extended/websocket/extended.ticker.service';
 import { LighterTickerService } from '../lighter/websocket/lighter.ticker.service';
-// Добавляем сервис для правильного поиска ID
 import { LighterService } from '../lighter/lighter.service';
+// Импортируем наш новый хелпер
+import * as Helpers from '../auto_trade/auto_trade.helpers';
 
 export type ExchangeName = 'Binance' | 'Hyperliquid' | 'Paradex' | 'Extended' | 'Lighter';
 
@@ -24,7 +24,7 @@ type TickerService =
     | ExtendedTickerService
     | LighterTickerService;
 
-@Injectable() // Важно для NestJS
+@Injectable()
 export class BpService {
     private readonly logger = new Logger(BpService.name);
 
@@ -35,7 +35,6 @@ export class BpService {
     private activeLongService: TickerService | null = null;
     private activeShortService: TickerService | null = null;
 
-    // Флаг для защиты от Race Condition
     private isStopping = false;
 
     constructor(
@@ -44,7 +43,7 @@ export class BpService {
         private paradexService: ParadexTickerService,
         private extendedService: ExtendedTickerService,
         private lighterTickerService: LighterTickerService,
-        private lighterDataService: LighterService, // <--- ИНЖЕКЦИЯ
+        private lighterDataService: LighterService,
     ) { }
 
     private getServiceFor(exchange: ExchangeName): TickerService {
@@ -58,34 +57,20 @@ export class BpService {
     }
 
     private async formatSymbolFor(exchange: ExchangeName, coin: string): Promise<string> {
-        let finalCoinSymbol: string;
-        const lowerCoin = coin.toLowerCase();
+        // Lighter требует особого подхода: нужно найти ID по тикеру
+        if (exchange === 'Lighter') {
+            // true = получаем "чистый" тикер (например 1000BONK) без суффиксов
+            const symbol = Helpers.getUnifiedSymbol(exchange, coin, true);
 
-        if (lowerCoin === 'kbonk' || lowerCoin === '1000bonk') {
-            if (exchange === 'Binance' || exchange === 'Lighter') {
-                finalCoinSymbol = '1000BONK';
-            } else {
-                finalCoinSymbol = 'kBONK';
-            }
-        } else if (lowerCoin === 'xyz100' || lowerCoin === 'tech100m') {
-            if (exchange === 'Extended') finalCoinSymbol = 'TECH100M';
-            else if (exchange === 'Hyperliquid') finalCoinSymbol = 'XYZ100';
-            else finalCoinSymbol = 'TECH100m';
-        } else {
-            finalCoinSymbol = coin.toUpperCase();
+            // Ищем ID в кэше LighterService
+            const id = this.lighterDataService.getMarketId(symbol);
+            if (id !== null) return id.toString();
+
+            throw new Error(`Market ${symbol} not found on Lighter.`);
         }
 
-        switch (exchange) {
-            case 'Binance': return `${finalCoinSymbol}USDT`;
-            case 'Extended': return `${finalCoinSymbol}-USD`;
-            case 'Paradex': return `${finalCoinSymbol}-USD-PERP`;
-            case 'Hyperliquid': return finalCoinSymbol;
-            case 'Lighter':
-                // Используем надежный метод из сервиса (он уже фильтрует перпы и кэширует)
-                const id = this.lighterDataService.getMarketId(finalCoinSymbol);
-                if (id !== null) return id.toString();
-                throw new Error(`Market ${finalCoinSymbol} not found on Lighter.`);
-        }
+        // Для остальных бирж просто используем хелпер
+        return Helpers.getUnifiedSymbol(exchange, coin);
     }
 
     public async start(
@@ -94,61 +79,75 @@ export class BpService {
         shortExchange: ExchangeName,
         callback: PriceUpdateCallback
     ): Promise<void> {
-        this.stop(); // Очистка перед стартом
+        this.stop();
         this.isStopping = false;
 
         try {
-            // Форматируем символы (это асинхронно, может упасть)
             const [longSymbol, shortSymbol] = await Promise.all([
                 this.formatSymbolFor(longExchange, coin),
                 this.formatSymbolFor(shortExchange, coin)
             ]);
 
-            // Если за время await пользователь нажал стоп - выходим
             if (this.isStopping) return;
 
-            this.activeLongService = this.getServiceFor(longExchange);
-            this.activeShortService = this.getServiceFor(shortExchange);
+            const longService = this.getServiceFor(longExchange);
+            const shortService = this.getServiceFor(shortExchange);
 
-            this.logger.log(`Starting BP for ${coin}: ${longExchange} vs ${shortExchange}`);
+            this.activeLongService = longService;
+            this.activeShortService = shortService;
 
-            // Запускаем тикеры ПАРАЛЛЕЛЬНО, но с безопасным перехватом
+            this.logger.log(`Starting BP for ${coin}: ${longExchange} (${longSymbol}) vs ${shortExchange} (${shortSymbol})`);
+
+            // Вспомогательная функция для безопасного старта
+            const startSafe = async (service: TickerService, symbol: string, onTick: (b: string, a: string) => void) => {
+                try {
+                    await service.start(symbol, onTick);
+                } catch (e) {
+                    throw e; // Ошибку прокидываем, чтобы Promise.all упал
+                } finally {
+                    // Если пока мы подключались, кто-то нажал стоп (или упал соседний сокет),
+                    // мы принудительно отключаем этот сервис
+                    if (this.isStopping) {
+                        console.log(`⚠️ Post-connect cleanup for ${symbol}`);
+                        service.stop();
+                    }
+                }
+            };
+
+            // Запускаем параллельно
             await Promise.all([
-                this.activeLongService.start(longSymbol, (_, ask: string) => {
+                startSafe(longService, longSymbol, (_, ask: string) => {
                     this.latestLongAsk = parseFloat(ask);
                 }),
-                this.activeShortService.start(shortSymbol, (bid: string, _) => {
+                startSafe(shortService, shortSymbol, (bid: string, _) => {
                     this.latestShortBid = parseFloat(bid);
                 })
             ]);
 
-            // Еще одна проверка после await
             if (this.isStopping) {
-                this.stop(); // Гарантированно закрываем, если успели открыться
+                this.stop();
                 return;
             }
 
-            console.log('BP Tickers connected.');
+            console.log('✅ BP Tickers connected successfully.');
 
             this.calculationInterval = setInterval(() => {
-                if (this.latestLongAsk !== null && this.latestShortBid !== null && this.latestLongAsk > 0 && this.latestShortBid > 0) {
+                if (this.latestLongAsk && this.latestShortBid && this.latestLongAsk > 0 && this.latestShortBid > 0) {
                     const bp = ((this.latestShortBid - this.latestLongAsk) / this.latestShortBid) * 10000;
-                    const data: BpCalculationData = {
+                    callback({
                         longPrice: this.latestLongAsk,
                         shortPrice: this.latestShortBid,
                         bpValue: bp
-                    };
-                    callback(data);
+                    });
                 } else {
-                    // Пока данных нет или они 0
                     callback(null);
                 }
-            }, 1000); // 1 сек интервал (безопаснее для callback)
+            }, 1000);
 
         } catch (error: any) {
-            this.logger.error(`Failed to start BP: ${error.message}`);
+            this.logger.error(`🔥 CRITICAL BP ERROR: ${error.message}`);
             this.stop();
-            throw error; // Пробрасываем в контроллер для вывода юзеру
+            throw error;
         }
     }
 
@@ -162,15 +161,16 @@ export class BpService {
 
         try {
             if (this.activeLongService?.stop) this.activeLongService.stop();
+        } catch (e) { console.error('Error closing Long socket:', e); }
+
+        try {
             if (this.activeShortService?.stop) this.activeShortService.stop();
-        } catch (e) {
-            console.error('Error closing sockets:', e);
-        }
+        } catch (e) { console.error('Error closing Short socket:', e); }
 
         this.activeLongService = null;
         this.activeShortService = null;
         this.latestLongAsk = null;
         this.latestShortBid = null;
-        console.log('BP Service stopped.');
+        console.log('🛑 BP Service fully stopped.');
     }
 }

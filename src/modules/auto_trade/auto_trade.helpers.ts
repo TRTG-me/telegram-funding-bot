@@ -14,36 +14,121 @@ export interface ITradingServices {
     lighter: LighterService;
 }
 
+// --- КОНФИГУРАЦИЯ МОНЕТ ---
+
+// Тип для маппинга: null означает, что пара не торгуется на бирже
+type CoinConfig = Record<string, Partial<Record<ExchangeName, string | null>>>;
+
+const SPECIAL_COINS: CoinConfig = {
+    'BONK': {
+        Binance: '1000BONK', Hyperliquid: 'kBONK', Paradex: 'kBONK', Lighter: '1000BONK', Extended: '1000BONK'
+    },
+    'PEPE': {
+        Binance: '1000PEPE', Hyperliquid: 'kPEPE', Paradex: 'kPEPE', Lighter: '1000PEPE', Extended: '1000PEPE'
+    },
+    'SHIB': {
+        Binance: '1000SHIB', Hyperliquid: 'kSHIB', Paradex: 'kSHIB', Lighter: '1000SHIB', Extended: '1000SHIB'
+    },
+    'FLOKI': {
+        Binance: '1000FLOKI', Hyperliquid: 'kFLOKI', Paradex: 'kFLOKI', Lighter: '1000FLOKI', Extended: null // Нет на Extended
+    },
+    // Технические тикеры
+    'XYZ100': {
+        Binance: 'XYZ100', Hyperliquid: 'XYZ100', Paradex: 'XYZ100', Lighter: 'XYZ100', Extended: 'TECH100M'
+    }
+};
+
+// Алиасы для поиска (чтобы разные названия вели к одному ключу в SPECIAL_COINS)
+const COIN_ALIASES: Record<string, string> = {
+    'TECH100M': 'XYZ100',
+    'XYZ:XYZ100': 'XYZ100', // Специфичный формат HL
+    'XYZ100': 'XYZ100'
+};
+
 // --- УТИЛИТЫ ---
 
 export const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-// Округление для избежания проблем с плавающей точкой (0.1 + 0.2 != 0.3)
 export const roundFloat = (num: number, decimals: number = 4) =>
     parseFloat(num.toFixed(decimals));
 
-// --- ЛОГИКА ТИКЕРОВ ---
+/**
+ * НОВАЯ ФУНКЦИЯ: Получение чистого имени актива.
+ * Очищает тикер от префиксов (1000, k) и суффиксов (USDT, -USD).
+ * Пример:
+ * 1000BONK -> BONK
+ * kBONK -> BONK
+ * ETH-USD-PERP -> ETH
+ */
+export function getAssetName(symbol: string): string {
+    let s = symbol.toUpperCase();
 
-export async function formatSymbol(exchange: ExchangeName, coin: string): Promise<string> {
-    let finalCoin = coin.toUpperCase();
-    const lower = coin.toLowerCase();
+    // 1. Убираем суффиксы бирж
+    s = s.replace(/-USD-PERP$/, '')
+        .replace(/-USD$/, '')
+        .replace(/-PERP$/, '')
+        .replace(/USDT$/, '')
+        .replace(/USDC$/, '');
 
-    if (lower === 'kbonk' || lower === '1000bonk') {
-        if (exchange === 'Binance' || exchange === 'Lighter') finalCoin = '1000BONK';
-        else finalCoin = 'kBONK';
-    } else if (lower === 'xyz100' || lower === 'tech100m') {
-        if (exchange === 'Extended') finalCoin = 'TECH100M';
-        else if (exchange === 'Hyperliquid') finalCoin = 'XYZ100';
-        else finalCoin = 'TECH100m';
+    // 2. Проверяем алиасы (до очистки префиксов, т.к. TECH100M специфичен)
+    if (COIN_ALIASES[s]) {
+        return COIN_ALIASES[s];
     }
 
+    // 3. Убираем префиксы (1000, k, K)
+    // 1000PEPE -> PEPE
+    if (s.startsWith('1000')) {
+        s = s.substring(4);
+    }
+    // KBONK -> BONK (но KDA не трогаем, проверяем длину > 3)
+    if (s.startsWith('K') && s.length > 3) {
+        s = s.substring(1);
+    }
+
+    // 4. Обернутые токены
+    if (s === 'WETH') return 'ETH';
+    if (s === 'WBTC') return 'BTC';
+
+    return s;
+}
+
+/**
+ * Универсальный метод получения тикера для конкретной биржи.
+ * @param exchange Название биржи
+ * @param coin Ввод пользователя (bonk, 1000bonk, kBonk, tech100m)
+ * @param rawSymbolOnly Если true, вернет тикер без суффиксов (USDT, -USD), удобно для поиска ID в Lighter
+ */
+export function getUnifiedSymbol(exchange: ExchangeName, coin: string, rawSymbolOnly: boolean = false): string {
+    const inputUpper = coin.toUpperCase();
+
+    // 1. Получаем базовый ключ актива через новую функцию
+    const baseKey = getAssetName(inputUpper);
+
+    // 2. Определение тикера для конкретной биржи
+    let targetSymbol = baseKey; // По умолчанию берем ключ (например, ETH)
+
+    if (SPECIAL_COINS[baseKey]) {
+        const specific = SPECIAL_COINS[baseKey][exchange];
+
+        if (specific === null) {
+            throw new Error(`Symbol ${baseKey} is not supported on ${exchange}`);
+        }
+        if (specific) {
+            targetSymbol = specific;
+        }
+    }
+
+    // Если нужен "сырой" тикер (для поиска ID в Lighter или HL API), возвращаем сразу
+    if (rawSymbolOnly) return targetSymbol;
+
+    // 3. Добавление суффиксов
     switch (exchange) {
-        case 'Binance': return `${finalCoin}USDT`;
-        case 'Hyperliquid': return finalCoin;
-        case 'Paradex': return `${finalCoin}-USD-PERP`;
-        case 'Extended': return `${finalCoin}-USD`;
-        case 'Lighter': return finalCoin; // Сервис сам найдет ID
-        default: return finalCoin;
+        case 'Binance': return `${targetSymbol}USDT`;
+        case 'Extended': return `${targetSymbol}-USD`;
+        case 'Paradex': return `${targetSymbol}-USD-PERP`;
+        case 'Hyperliquid': return targetSymbol; // Обычно HL не требует суффиксов (или требует -PERP для ордеров)
+        case 'Lighter': return targetSymbol; // Возвращаем тикер (1000BONK), сервис сам найдет ID
+        default: return targetSymbol;
     }
 }
 
@@ -57,19 +142,34 @@ export async function executeTrade(
     services: ITradingServices
 ): Promise<{ success: boolean, price?: number, error?: string }> {
     try {
-        let symbol = await formatSymbol(exchange, coin);
+        // Получаем правильный символ для биржи
+        let symbol = getUnifiedSymbol(exchange, coin);
 
         // ============ BINANCE ============
         if (exchange === 'Binance') {
-            const res = await services.binance.placeBinOrder(symbol, side, qty);
+            let res: any;
+            let placeAttempts = 0;
+            const maxPlaceAttempts = 3;
 
-            if (!res.clientOrderId) {
+            while (placeAttempts < maxPlaceAttempts) {
+                try {
+                    res = await services.binance.placeBinOrder(symbol, side, qty);
+                    if (res && res.clientOrderId) break;
+                } catch (e: any) {
+                    console.warn(`[Binance] Place order failed (Attempt ${placeAttempts + 1}/${maxPlaceAttempts}): ${e.message}`);
+                    if (placeAttempts === maxPlaceAttempts - 1) throw e;
+                    if (e.message.includes('Insufficient') || e.message.includes('Invalid')) throw e;
+                    await sleep(300);
+                }
+                placeAttempts++;
+            }
+
+            if (!res || !res.clientOrderId) {
                 return { success: false, error: 'No clientOrderId returned from Binance' };
             }
 
-            let attempts = 0;
-            // Ждем до 10 секунд
-            while (attempts < 20) {
+            let checkAttempts = 0;
+            while (checkAttempts < 20) {
                 try {
                     const orderInfo = await services.binance.getBinOrderInfo(symbol, res.clientOrderId);
                     if (orderInfo && orderInfo.status === 'FILLED') {
@@ -77,20 +177,19 @@ export async function executeTrade(
                     }
                 } catch (e: any) {
                     if (!e.message?.includes('Order does not exist')) {
-                        console.warn(`Binance retry warning: ${e.message}`);
+                        console.warn(`Binance check warning: ${e.message}`);
                     }
                 }
                 await sleep(500);
-                attempts++;
+                checkAttempts++;
             }
             return { success: false, error: 'Binance Order Timeout' };
         }
-
         // ============ HYPERLIQUID ============
         else if (exchange === 'Hyperliquid') {
-            if (!symbol.includes('-PERP')) symbol = symbol + '-PERP';
+            // HL API для ордеров требует -PERP
+            if (!symbol.endsWith('-PERP')) symbol = symbol + '-PERP';
 
-            // Retry logic для 502 ошибок
             let attempts = 0;
             while (attempts < 5) {
                 try {
@@ -111,7 +210,9 @@ export async function executeTrade(
 
         // ============ PARADEX ============
         else if (exchange === 'Paradex') {
+            // Helper уже возвращает с -USD-PERP, но на всякий случай
             if (!symbol.endsWith('-USD-PERP')) symbol = `${symbol}-USD-PERP`;
+
             const res = await services.paradex.placeMarketOrder(symbol, side, qty);
             if (res.status === 'FILLED') {
                 return { success: true, price: res.price };
@@ -142,8 +243,6 @@ export async function executeTrade(
                 attempts++;
             }
 
-            // СТРОГИЙ РЕЖИМ: Если за 15 сек API не отдало ордер - считаем ошибкой.
-            // Это остановит бота и предотвратит рассинхрон.
             return {
                 success: false,
                 error: `Extended API Timeout: Order ${res.orderId} unverified`
@@ -152,12 +251,9 @@ export async function executeTrade(
 
         // ============ LIGHTER ============
         else if (exchange === 'Lighter') {
-            // placeOrder сам внутри делает Polling по txHash (до 20 сек)
+            // Передаем "чистый" тикер (например 1000BONK). Сервис внутри найдет ID.
             const res = await services.lighter.placeOrder(symbol, side, qty, 'MARKET');
 
-            // СТРОГИЙ РЕЖИМ
-            // Если статус ASSUMED (API 404/Timeout) или цена 0 — считаем это ошибкой.
-            // Бот остановится, если вторая нога успешна.
             if (res.status === 'ASSUMED_FILLED' || res.avgPrice <= 0) {
                 return {
                     success: false,
@@ -185,29 +281,30 @@ export async function getPositionData(
 ): Promise<{ size: number, price: number }> {
     try {
         if (exchange === 'Binance') {
-            const targetSymbol = await formatSymbol('Binance', coin);
+            const targetSymbol = getUnifiedSymbol('Binance', coin);
             const pos = await services.binance.getOpenPosition(targetSymbol);
             if (pos) return { size: Math.abs(parseFloat(pos.amt)), price: parseFloat(pos.entryPrice) };
         }
         else if (exchange === 'Hyperliquid') {
-            const targetCoin = coin.toUpperCase().replace('-PERP', '');
+            // HL positions API часто использует чистый тикер (kBONK), без -PERP
+            const targetCoin = getUnifiedSymbol('Hyperliquid', coin, true);
             const pos = await services.hl.getOpenPosition(targetCoin);
             if (pos) return { size: pos.size, price: pos.entryPrice || 0 };
         }
         else if (exchange === 'Paradex') {
-            const targetSymbol = await formatSymbol('Paradex', coin);
+            const targetSymbol = getUnifiedSymbol('Paradex', coin);
             const pos = await services.paradex.getOpenPosition(targetSymbol);
             if (pos) return { size: pos.size, price: pos.entryPrice || 0 };
         }
         else if (exchange === 'Extended') {
-            const targetSymbol = await formatSymbol('Extended', coin);
+            const targetSymbol = getUnifiedSymbol('Extended', coin);
             const pos = await services.extended.getOpenPosition(targetSymbol);
             if (pos) return { size: pos.size, price: pos.entryPrice || 0 };
         }
         else if (exchange === 'Lighter') {
-            const targetSymbol = await formatSymbol('Lighter', coin);
+            const targetSymbol = getUnifiedSymbol('Lighter', coin, true);
             const allPositions = await services.lighter.getDetailedPositions();
-            const pos = allPositions.find(p => p.coin === targetSymbol || p.coin.includes(coin));
+            const pos = allPositions.find(p => p.coin === targetSymbol || p.coin.includes(targetSymbol));
             if (pos) return { size: pos.size, price: pos.entryPrice || 0 };
         }
 
