@@ -5,6 +5,8 @@ import { ParadexService } from '../paradex/paradex.service';
 import { LighterService } from '../lighter/lighter.service';
 import { ExtendedService } from '../extended/extended.service';
 import { IDetailedPosition } from '../../common/interfaces';
+// Импортируем хелпер
+import * as Helpers from '../auto_trade/auto_trade.helpers';
 
 export interface HedgedPair {
     coin: string;
@@ -51,38 +53,19 @@ export class TotalPositionsService {
 
         results.forEach((result, index) => {
             if (result.status === 'fulfilled') {
-                // --- ГЛАВНОЕ ИЗМЕНЕНИЕ: Нормализация названий монет ---
                 const normalizedPositions = result.value.map(position => {
-                    // Создаем копию, чтобы не изменять оригинальные данные
+                    // Создаем копию
                     const newPosition = { ...position };
-                    const upperCoin = newPosition.coin.toUpperCase();
 
-                    // 1. Кейс BONK: 1000BONK -> KBONK
-                    if (upperCoin === '1000BONK' || upperCoin === 'KBONK') {
-                        if (newPosition.coin !== 'KBONK') {
-                            // console.log(`Normalizing position for ${newPosition.coin} from ${newPosition.exchange} to KBONK.`);
-                        }
-                        newPosition.coin = 'KBONK';
-                    }
-
-                    // 2. Кейс TECH100: XYZ100 -> TECH100m
-                    // Проверяем вариации: XYZ100 (Hyperliquid) или TECH100M (Extended)
-                    else if (
-                        upperCoin === 'XYZ:XYZ100' || // Твой случай из телеграма
-                        upperCoin === 'XYZ100' ||     // Старый случай
-                        upperCoin === 'TECH100M'      // Название на Extended
-                    ) {
-                        // console.log(`Normalizing ${newPosition.coin} to TECH100m`);
-                        // Приводим все варианты к единому названию
-                        newPosition.coin = 'TECH100m';
-                    }
+                    // --- НОРМАЛИЗАЦИЯ ЧЕРЕЗ ХЕЛПЕР ---
+                    // Превращает 1000BONK, kBONK -> BONK
+                    // XYZ100, TECH100M -> XYZ100
+                    newPosition.coin = Helpers.getAssetName(newPosition.coin);
 
                     return newPosition;
                 });
 
-                // Добавляем в общий массив уже нормализованные позиции
                 allPositions.push(...normalizedPositions);
-
             } else {
                 console.error(`Failed to fetch positions from ${services[index].constructor.name}:`, result.reason);
             }
@@ -96,7 +79,7 @@ export class TotalPositionsService {
         const TOLERANCE = 1e-9;
         const formatFunding = (rate: number): number => parseFloat(rate.toFixed(4));
 
-        // Создаем рабочие копии позиций с полем remainingSize
+        // Создаем рабочие копии
         const workingPositions = positions.map(p => ({ ...p, remainingSize: p.size }));
         const positionsByCoin = new Map<string, typeof workingPositions>();
 
@@ -147,6 +130,7 @@ export class TotalPositionsService {
         const unhedgedPositions: UnhedgedPosition[] = workingPositions
             .filter(p => p.remainingSize > TOLERANCE)
             .map(p => {
+                // Если позиция осталась частично, ношнл считаем пропорционально
                 const notional = (p.remainingSize / p.size) * parseFloat(p.notional);
                 return {
                     coin: p.coin,

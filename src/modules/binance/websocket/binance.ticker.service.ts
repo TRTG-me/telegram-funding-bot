@@ -26,7 +26,7 @@ export class BinanceTickerService {
      */
     public start(symbol: string, callback: PriceUpdateCallback): Promise<void> {
         // 1. Запоминаем текущий активный символ (в верхнем регистре, т.к. Binance шлет так)
-        this.activeSymbol = symbol.toUpperCase();
+        this.activeSymbol = symbol
 
         return new Promise(async (resolve, reject) => {
             if (this.connection) {
