@@ -10,6 +10,9 @@ import {
     IParadexPositionsResponse
 } from '../../common/interfaces';
 
+// --- КОНСТАНТЫ ---
+const HTTP_TIMEOUT = 10000; // 10 секунд
+
 // --- ЗАГОЛОВКИ БРАУЗЕРА (ОБЯЗАТЕЛЬНО) ---
 const BROWSER_HEADERS = {
     'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
@@ -28,7 +31,6 @@ export class ParadexService {
     private readonly privateKey: string;
 
     // --- АВТОРИЗАЦИЯ ---
-    // RPI требует короткоживущие токены (300 секунд / 5 минут)
     private readonly TOKEN_LIFETIME_SECONDS = 300;
     private jwtToken: string | null = null;
     private tokenExpiration: number = 0;
@@ -59,6 +61,7 @@ export class ParadexService {
 
     private getErrorMessage(error: unknown): string {
         if (axios.isAxiosError(error)) {
+            if (error.code === 'ECONNABORTED') return 'Network Timeout';
             return JSON.stringify(error.response?.data) || error.message;
         }
         if (error instanceof Error) return error.message;
@@ -71,8 +74,10 @@ export class ParadexService {
 
     private async getServerTime(): Promise<number> {
         try {
-            // Важно: добавляем заголовки браузера даже сюда
-            const response = await axios.get(`${this.apiUrl}/system/time`, { headers: BROWSER_HEADERS });
+            const response = await axios.get(`${this.apiUrl}/system/time`, {
+                headers: BROWSER_HEADERS,
+                timeout: HTTP_TIMEOUT // <--- Timeout
+            });
             const serverTimeMicro = parseInt(response.data.server_time || response.data.time);
             return Math.floor(serverTimeMicro / 1000);
         } catch (error) {
@@ -82,16 +87,12 @@ export class ParadexService {
     }
 
     private async getJwtToken(): Promise<string> {
-        // Проактивная проверка: если до смерти токена осталось меньше 60 сек, обновляем
         if (this.jwtToken && this.tokenExpiration > Date.now() + 60000) {
             return this.jwtToken;
         }
 
         try {
-            // console.log('[Paradex] Refreshing Interactive Token...');
             const timestamp = await this.getServerTime();
-
-            // RPI требование: Expiration = timestamp + 300 (5 минут)
             const expiration = timestamp + this.TOKEN_LIFETIME_SECONDS;
 
             const request: IAuthRequest = {
@@ -122,25 +123,25 @@ export class ParadexService {
             const signature = JSON.stringify([r.toString(), s.toString()]);
 
             const headers = {
-                ...BROWSER_HEADERS, // Добавляем User-Agent и Origin
+                ...BROWSER_HEADERS,
                 'Accept': 'application/json',
                 'PARADEX-STARKNET-ACCOUNT': this.accountAddress,
                 'PARADEX-STARKNET-SIGNATURE': signature,
                 'PARADEX-TIMESTAMP': timestamp.toString(),
                 'PARADEX-SIGNATURE-EXPIRATION': expiration.toString(),
-                'PARADEX-AUTHORIZE-ISOLATED-MARKETS': 'true' // RPI требование
+                'PARADEX-AUTHORIZE-ISOLATED-MARKETS': 'true'
             };
 
-            // RPI требование: ?token_usage=interactive
-            const response = await axios.post(`${this.apiUrl}/auth?token_usage=interactive`, "", { headers });
+            const response = await axios.post(`${this.apiUrl}/auth?token_usage=interactive`, "", {
+                headers,
+                timeout: HTTP_TIMEOUT // <--- Timeout
+            });
 
             if (!response.data || !response.data.jwt_token) {
                 throw new Error('No jwt_token in response');
             }
 
             this.jwtToken = response.data.jwt_token;
-
-            // Вычисляем время истечения локально (текущее + 300 сек)
             this.tokenExpiration = Date.now() + (this.TOKEN_LIFETIME_SECONDS * 1000);
 
             return this.jwtToken as string;
@@ -160,11 +161,12 @@ export class ParadexService {
                 method,
                 url: `${this.apiUrl}${endpoint}`,
                 headers: {
-                    ...BROWSER_HEADERS, // Все запросы должны быть "от браузера"
+                    ...BROWSER_HEADERS,
                     'Accept': 'application/json',
                     'Authorization': `Bearer ${t}`
                 },
-                data
+                data,
+                timeout: HTTP_TIMEOUT // <--- ВАЖНО: Timeout для всех API вызовов
             };
             return await axios(config);
         };
@@ -173,7 +175,7 @@ export class ParadexService {
             const res = await makeCall(token);
             return res.data;
         } catch (error: any) {
-            // Если 401, пробуем обновить токен (хотя проактивная проверка выше должна это предотвращать)
+            // Если 401, пробуем обновить токен
             if (axios.isAxiosError(error) && error.response?.status === 401) {
                 console.warn('[Paradex] 401 Unauthorized. Force refreshing token...');
                 this.jwtToken = null;
@@ -187,7 +189,7 @@ export class ParadexService {
     }
 
     // =================================================================
-    // МЕТОДЫ (Без изменений в логике, но используют обновленный requestWithRetry)
+    // МЕТОДЫ
     // =================================================================
 
     private async _getOpenPositions(): Promise<IParadexPosition[]> {
@@ -204,16 +206,21 @@ export class ParadexService {
     }
 
     public async getDetailedPositions(): Promise<IDetailedPosition[]> {
-        // ... (Код без изменений, скопируйте из вашего текущего файла) ...
         try {
             const openPositions = await this._getOpenPositions();
             const detailed = await Promise.all(openPositions.map(async (pos) => {
                 if (!pos.market) return null;
                 try {
-                    // Добавляем BROWSER_HEADERS в публичные запросы тоже
+                    // Добавляем Timeout в параллельные запросы инфо о рынке
                     const [marketRes, summaryRes] = await Promise.all([
-                        axios.get(`${this.apiUrl}/markets?market=${pos.market}`, { headers: BROWSER_HEADERS }),
-                        axios.get(`${this.apiUrl}/markets/summary?market=${pos.market}`, { headers: BROWSER_HEADERS })
+                        axios.get(`${this.apiUrl}/markets?market=${pos.market}`, {
+                            headers: BROWSER_HEADERS,
+                            timeout: HTTP_TIMEOUT
+                        }),
+                        axios.get(`${this.apiUrl}/markets/summary?market=${pos.market}`, {
+                            headers: BROWSER_HEADERS,
+                            timeout: HTTP_TIMEOUT
+                        })
                     ]);
 
                     const marketDetails = marketRes.data.results[0];
@@ -221,7 +228,6 @@ export class ParadexService {
 
                     const size = Math.abs(parseFloat(pos.size || '0'));
 
-                    // Берем цену входа (исправленная логика из прошлого раза)
                     let entryPrice = parseFloat(pos.average_entry_price_usd || '0');
                     if (entryPrice === 0 && pos.average_entry_price_usd) {
                         entryPrice = parseFloat(pos.average_entry_price_usd);
@@ -268,7 +274,6 @@ export class ParadexService {
 
             const totalNotional = openPositions.reduce((sum, p) => sum + this._calculatePositionNotional(p), 0);
 
-            // Расчет P_MM_keff
             const P_MM_keff = totalNotional ? (maintMargin / totalNotional) : 0;
 
             if (totalNotional === 0) return { leverage: 0, accountEquity: accountValue, P_MM_keff };
@@ -349,8 +354,6 @@ export class ParadexService {
                 size: quantity.toString(),
                 signature: signature,
                 signature_timestamp: timestampMs,
-
-                // --- RPI ТРЕБОВАНИЕ ---
                 instruction: 'IOC'
             };
 
@@ -388,6 +391,30 @@ export class ParadexService {
         } catch (err: any) {
             console.error('Paradex Trade Error:', err.message);
             throw err;
+        }
+    }
+    // Быстрый метод для Auto-Close
+    public async getSimplePositions(): Promise<IDetailedPosition[]> {
+        try {
+            // Только 1 запрос!
+            const openPositions = await this._getOpenPositions();
+
+            return openPositions.map(pos => {
+                if (!pos.market) return null;
+                const size = Math.abs(parseFloat(pos.size || '0'));
+                return {
+                    coin: pos.market.replace(/-USD-PERP$/, ''),
+                    notional: '0',
+                    size: size,
+                    side: pos.side === 'LONG' ? 'L' : 'S',
+                    exchange: 'P',
+                    fundingRate: 0,
+                    entryPrice: 0
+                } as IDetailedPosition;
+            }).filter((p): p is IDetailedPosition => p !== null);
+        } catch (err) {
+            console.error('[Paradex] Simple positions error:', err);
+            return [];
         }
     }
 }

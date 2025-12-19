@@ -8,9 +8,13 @@ import {
     IAssetDataContextHyper
 } from '../../common/interfaces';
 
+// Используем require для SDK, если нет типов
 const { Hyperliquid } = require('hyperliquid');
 
 type MetaAndAssetCtxsResponse = [{ universe: IAssetNameInfoHyper[] }, IAssetDataContextHyper[]];
+
+// Константа таймаута для HTTP запросов
+const HTTP_TIMEOUT = 10000;
 
 export class HyperliquidService {
     // Конфигурация, которая будет задана в конструкторе
@@ -38,19 +42,15 @@ export class HyperliquidService {
             console.log('🟡 [Hyperliquid] Initializing in TESTNET mode');
             this.API_URL = 'https://api.hyperliquid-testnet.xyz/info';
 
-            // Используем тестовые ключи из .env
             this.userAddress = process.env.HL_WALLET_ADDRESS_TEST || '';
             this.privateKey = process.env.HL_PRIVATE_KEY_TEST || '';
-            // В тестнете основным адресом для проверки стейта считаем адрес кошелька
             this.userAddress_main = process.env.HL_ACCOUNT_ETH_TEST || '';
         } else {
             console.log('🟢 [Hyperliquid] Initializing in MAINNET mode');
             this.API_URL = 'https://api.hyperliquid.xyz/info';
 
-            // Используем боевые ключи
             this.userAddress = process.env.HL_WALLET_ADDRESS || '';
             this.privateKey = process.env.HL_PRIVATE_KEY || '';
-            // В майнете может быть отдельный адрес для мониторинга
             this.userAddress_main = process.env.HL_ACCOUNT_ETH || '';
         }
 
@@ -64,7 +64,7 @@ export class HyperliquidService {
             this.sdk = new Hyperliquid({
                 enableWs: false,
                 privateKey: this.privateKey,
-                testnet: this.isTestnet, // Динамически передаем флаг
+                testnet: this.isTestnet,
                 walletAddress: this.userAddress,
             });
             this.initSdk().catch(err => console.error('Failed to init Hyperliquid SDK:', err));
@@ -92,6 +92,9 @@ export class HyperliquidService {
     }
 
     private getErrorMessage(error: unknown): string {
+        if (axios.isAxiosError(error) && error.code === 'ECONNABORTED') {
+            return 'Network Timeout';
+        }
         if (error instanceof Error) return error.message;
         try { return JSON.stringify(error); } catch { return String(error); }
     }
@@ -108,8 +111,8 @@ export class HyperliquidService {
                 body.dex = dex;
             }
 
-            // Запрос идет на URL, выбранный в конструкторе
-            const response = await axios.post(this.API_URL, body);
+            // Добавил таймаут
+            const response = await axios.post(this.API_URL, body, { timeout: HTTP_TIMEOUT });
             return response.data || {};
         } catch (error) {
             if (dex) {
@@ -126,7 +129,8 @@ export class HyperliquidService {
             const body: any = { type: 'metaAndAssetCtxs' };
             if (dex) body.dex = dex;
 
-            const response = await axios.post<MetaAndAssetCtxsResponse>(this.API_URL, body);
+            // Добавил таймаут
+            const response = await axios.post<MetaAndAssetCtxsResponse>(this.API_URL, body, { timeout: HTTP_TIMEOUT });
             const [meta, contexts] = response.data;
 
             if (!meta?.universe || !contexts) return [];
@@ -288,7 +292,10 @@ export class HyperliquidService {
             console.log(`[Hyperliquid] Placing MARKET order: ${side} ${quantity} ${symbol}`);
 
             const isBuy = side === 'BUY';
-            // SDK сам знает куда слать (testnet/mainnet) из конструктора
+            // В SDK таймауты зашиты внутри библиотеки, 
+            // но сама инициализация ордера работает через WebSocket/Signing, там HTTP таймаут не поможет.
+            // Однако, мы защитили основные методы сбора данных (getAccountState), 
+            // что предотвращает зависание мониторинга.
             const result = await this.sdk.custom.marketOpen(symbol, isBuy, quantity);
 
             const statuses = result.response?.data?.statuses;
@@ -324,6 +331,50 @@ export class HyperliquidService {
             console.error('Error placing Hyperliquid order:', err);
             const message = this.getErrorMessage(err);
             throw new Error(`Failed to place order on Hyperliquid: ${message}`);
+        }
+    }
+    // --- Оптимизированный метод для Auto-Close ---
+    // Не запрашивает MetaAndAssetCtxs (фандинги), экономит время и лимиты.
+    public async getSimplePositions(): Promise<IDetailedPosition[]> {
+        try {
+            // Запрашиваем только стейт аккаунта (Main + Secondary)
+            // Это 2 параллельных запроса вместо 3 тяжелых
+            const [mainState, secondaryState] = await Promise.all([
+                this.getAccountState(),
+                this.getAccountState(this.SECONDARY_DEX_ID)
+            ]);
+
+            const mapPositions = (positions: any[], exchangeLabel: string): IDetailedPosition[] => {
+                if (!Array.isArray(positions)) return [];
+                return positions
+                    .filter(p => p.position?.szi && parseFloat(p.position.szi) !== 0)
+                    .map(p => {
+                        const position = p.position;
+                        const szi = parseFloat(position.szi!);
+                        const upnl = parseFloat(position.unrealizedPnl || '0');
+                        const val = parseFloat(position.positionValue || '0');
+
+                        return {
+                            coin: position.coin!, // API возвращает имя монеты (ETH, BTC)
+                            notional: val.toString(),        // Для авто-закрытия не критично
+                            size: Math.abs(szi),
+                            side: szi > 0 ? 'L' : 'S',
+                            exchange: exchangeLabel,
+                            fundingRate: 0,       // Экономим время
+                            entryPrice: 0,
+                            unrealizedPnl: Math.abs(upnl)
+                        };
+                    });
+            };
+
+            const listA = mapPositions(mainState.assetPositions || [], 'H');
+            const listB = mapPositions(secondaryState.assetPositions || [], 'H');
+
+            return [...listA, ...listB];
+
+        } catch (err) {
+            console.error('[Hyperliquid] Simple positions error:', err);
+            return [];
         }
     }
 }

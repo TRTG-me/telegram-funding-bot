@@ -12,6 +12,7 @@ export interface IDetailedPosition {
     exchange: string;
     fundingRate: number
     entryPrice?: number
+    unrealizedPnl?: number
 }
 
 export interface IParadexAccountResponse {

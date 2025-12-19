@@ -3,7 +3,6 @@ import { randomUUID } from 'crypto';
 import { ec, num, shortString, constants } from 'starknet';
 import { poseidonHashMany } from '@scure/starknet';
 
-
 import {
     IExchangeData,
     IDetailedPosition,
@@ -15,7 +14,8 @@ import {
 // Настройки
 const CONFIG = {
     DEFAULT_SLIPPAGE: 0.0075, // 0.75%
-    EXPIRATION_HOURS: 1
+    EXPIRATION_HOURS: 1,
+    HTTP_TIMEOUT: 10000 // <--- НОВОЕ: 10 секунд на запрос
 };
 
 export class ExtendedService {
@@ -31,8 +31,9 @@ export class ExtendedService {
         this.isTestnet = process.env.TESTNET === 'true';
 
         this.apiUrl = this.isTestnet
-            ? 'https://api.starknet.sepolia.extended.exchange/api/v1' // Testnet
-            : 'https://api.starknet.extended.exchange/api/v1';         // Mainnet
+            ? 'https://api.starknet.sepolia.extended.exchange/api/v1'
+            : 'https://api.starknet.extended.exchange/api/v1';
+
         if (this.isTestnet) {
             console.log('🟡 [Extended] Initializing in TESTNET mode');
         } else {
@@ -58,6 +59,8 @@ export class ExtendedService {
 
     private getErrorMessage(error: unknown): string {
         if (axios.isAxiosError(error)) {
+            // Если таймаут
+            if (error.code === 'ECONNABORTED') return 'Network Timeout';
             return JSON.stringify(error.response?.data) || error.message;
         }
         if (error instanceof Error) return error.message;
@@ -65,13 +68,14 @@ export class ExtendedService {
     }
 
     // =========================================================================
-    // --- 1. OLD DATA FETCHING METHODS (Сохраненные старые методы) ---
+    // --- 1. DATA FETCHING METHODS ---
     // =========================================================================
 
     private async getAccountBalance(): Promise<IExtendedApiResponse> {
         try {
             const response = await axios.get(`${this.apiUrl}/user/balance`, {
                 headers: { 'X-Api-Key': this.apiKey, 'Content-Type': 'application/json' },
+                timeout: CONFIG.HTTP_TIMEOUT // <--- Added Timeout
             });
             return response.data;
         } catch (error) {
@@ -83,7 +87,8 @@ export class ExtendedService {
         try {
             const response = await axios.get(`${this.apiUrl}/user/positions`, {
                 headers: { 'X-Api-Key': this.apiKey, 'Content-Type': 'application/json' },
-            });
+                timeout: CONFIG.HTTP_TIMEOUT // <--- Added Timeout
+            },);
             return response.data;
         } catch (error) {
             throw new Error(`Failed to fetch positions: ${this.getErrorMessage(error)}`);
@@ -102,7 +107,11 @@ export class ExtendedService {
 
             const detailedPositionsPromises = openPositions.map(async (position): Promise<IDetailedPosition> => {
                 const market = position.market;
-                const statsResponse = await axios.get<IExtendedMarketStatsResponse>(`${this.apiUrl}/info/markets/${market}/stats`);
+                // <--- Added Timeout here inside the loop
+                const statsResponse = await axios.get<IExtendedMarketStatsResponse>(
+                    `${this.apiUrl}/info/markets/${market}/stats`,
+                    { timeout: CONFIG.HTTP_TIMEOUT }
+                );
                 const fundingRateData = statsResponse.data?.data?.fundingRate || '0';
                 const fundingRate = parseFloat(fundingRateData) * 8 * 100;
 
@@ -154,13 +163,9 @@ export class ExtendedService {
     }
 
     // =========================================================================
-    // --- 2. TRADING METHODS (UPDATED) ---
+    // --- 2. TRADING METHODS ---
     // =========================================================================
 
-    /**
-     * Размещает ордер (MARKET или LIMIT).
-     * Для MARKET цена рассчитывается автоматически на основе стакана + slippage.
-     */
     public async placeOrder(
         symbol: string,
         side: 'BUY' | 'SELL',
@@ -178,9 +183,11 @@ export class ExtendedService {
 
         console.log(`\n🚀 ${type} ${side} ${symbol} | Qty: ${qty} ${type === 'LIMIT' ? '| Price: ' + price : ''}`);
 
+        // <--- ВАЖНО: Добавлен timeout в инстанс. Это защитит все 5 запросов внутри этого метода.
         const api = axios.create({
             baseURL: this.apiUrl,
-            headers: { 'X-Api-Key': this.apiKey, 'Content-Type': 'application/json' }
+            headers: { 'X-Api-Key': this.apiKey, 'Content-Type': 'application/json' },
+            timeout: CONFIG.HTTP_TIMEOUT
         });
 
         try {
@@ -206,30 +213,23 @@ export class ExtendedService {
 
             if (type === 'MARKET') {
                 const isBuy = side === 'BUY';
-                // BUY -> Ask, SELL -> Bid
                 const basePrice = parseFloat(isBuy ? marketStats.askPrice : marketStats.bidPrice);
-
-                // Применяем проскальзывание
                 const priceWithSlippage = basePrice * (isBuy ? (1 + slippage) : (1 - slippage));
-
-                // Округляем цену согласно шагу (minPriceChange)
-                // BUY -> ВВЕРХ (ceil), SELL -> ВНИЗ (floor), чтобы ордер точно исполнился
                 finalPrice = this.roundToStep(priceWithSlippage, marketData.tradingConfig.minPriceChange, isBuy ? 'ceil' : 'floor');
 
-                timeInForce = 'IOC'; // Immediate or Cancel (для маркета)
+                timeInForce = 'IOC';
                 postOnly = false;
                 console.log(`💡 Market Price Calc: ${basePrice} -> ${finalPrice} (w/ slippage)`);
             } else {
-                // LIMIT
                 if (!price) throw new Error('Price is required for LIMIT orders');
                 finalPrice = price.toString();
-                timeInForce = 'GTT'; // Good Till Time
-                postOnly = true;     // Обычно Лимитки = PostOnly
+                timeInForce = 'GTT';
+                postOnly = true;
             }
 
             // 3. Расчет комиссии
             const feeRate = Math.max(parseFloat(feesData.makerFeeRate), parseFloat(feesData.takerFeeRate)).toString();
-            const myUuid = randomUUID(); // Наш external ID
+            const myUuid = randomUUID();
 
             const orderPayload = {
                 market: symbol,
@@ -246,7 +246,7 @@ export class ExtendedService {
                 id: myUuid
             };
 
-            // 4. Подпись (StarkEx logic)
+            // 4. Подпись
             const settlement = this.signOrder(orderPayload, marketData, starknetData);
 
             // 5. Отправка
@@ -259,7 +259,7 @@ export class ExtendedService {
             console.log(`✅ Success! Order UUID: ${response.data.data.externalId}\n`);
 
             return {
-                orderId: response.data.data.externalId, // Возвращаем UUID                
+                orderId: response.data.data.externalId,
                 sentPrice: finalPrice,
                 type: type
             };
@@ -274,19 +274,15 @@ export class ExtendedService {
         }
     }
 
-    /**
-     * Получение деталей ордера по External ID (UUID).
-     * Используется для получения реальной цены исполнения MARKET ордера.
-     */
     public async getOrderDetails(externalId: string): Promise<any> {
         try {
-            // Эмуляция браузера + обязательный API Key
             const response = await axios.get(`${this.apiUrl}/user/orders/external/${externalId}`, {
                 headers: {
                     'X-Api-Key': this.apiKey,
                     'Content-Type': 'application/json',
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                }
+                },
+                timeout: CONFIG.HTTP_TIMEOUT // <--- Added Timeout
             });
 
             if (response.data.status === 'OK' && response.data.data) {
@@ -302,13 +298,9 @@ export class ExtendedService {
     }
 
     // =========================================================================
-    // --- 3. HELPERS (Signature, Rounding, Parsing) ---
+    // --- 3. HELPERS ---
     // =========================================================================
 
-    /**
-     * Логика подписи ордера.
-     * Полностью повторяет рабочий JS-скрипт (starknet logic).
-     */
     private signOrder(order: any, marketInfo: any, network: any) {
         const isBuy = order.side === 'BUY';
         const amount = parseFloat(order.qty);
@@ -316,25 +308,18 @@ export class ExtendedService {
         const totalValue = amount * price;
         const feeRate = parseFloat(order.fee);
 
-        // Resolutions
         const resSynthetic = BigInt(marketInfo.l2Config.syntheticResolution);
         const resCollateral = BigInt(marketInfo.l2Config.collateralResolution);
 
-        // Rounding (Math.round как в эталонном скрипте)
         const amountStark = BigInt(Math.round(amount * Number(resSynthetic)));
         const collateralStark = BigInt(Math.round(totalValue * Number(resCollateral)));
-
-        // Fee: всегда округляем ВВЕРХ (Ceil)
         const feeStark = BigInt(Math.ceil(Number((totalValue * feeRate * Number(resCollateral)).toFixed(6))));
 
-        // Знаки: BUY -> (+Syn, -Col), SELL -> (-Syn, +Col)
-        // poseidonHashMany библиотеки @scure/starknet корректно хеширует отрицательные BigInt
         const baseAmount = isBuy ? amountStark : -amountStark;
         const quoteAmount = isBuy ? -collateralStark : collateralStark;
 
-        const expiration = Math.ceil(order.expiryEpochMillis / 1000) + (14 * 86400); // +14 days
+        const expiration = Math.ceil(order.expiryEpochMillis / 1000) + (14 * 86400);
 
-        // 1. Domain Hash
         const domainHash = poseidonHashMany([
             BigInt('0x1ff2f602e42168014d405a94f75e8a93d640751d71d16311266e140d8b0a210'),
             this.stringToFelt(network.name),
@@ -343,9 +328,8 @@ export class ExtendedService {
             BigInt(network.revision)
         ]);
 
-        // 2. Order Hash
         const orderHash = poseidonHashMany([
-            BigInt('0x36da8d51815527cabfaa9c982f564c80fa7429616739306036f1f9b608dd112'), // Selector
+            BigInt('0x36da8d51815527cabfaa9c982f564c80fa7429616739306036f1f9b608dd112'),
             BigInt(this.vaultId),
             BigInt(marketInfo.l2Config.syntheticId),
             baseAmount,
@@ -357,7 +341,6 @@ export class ExtendedService {
             BigInt(order.nonce)
         ]);
 
-        // 3. Final Signature
         const msgHash = poseidonHashMany([
             BigInt(shortString.encodeShortString("StarkNet Message")),
             domainHash,
@@ -378,15 +361,8 @@ export class ExtendedService {
         return BigInt(shortString.encodeShortString(str));
     }
 
-    /**
-     * Округляет число до заданного шага (step).
-     * @param value Число
-     * @param stepStr Шаг (например, "0.05")
-     * @param mode 'floor' (вниз) или 'ceil' (вверх)
-     */
     private roundToStep(value: number, stepStr: string, mode: 'floor' | 'ceil' = 'floor'): string {
         const step = parseFloat(stepStr);
-        // Считаем кол-во знаков после запятой у шага
         const precision = stepStr.split('.')[1]?.length || 0;
 
         let rounded: number;
@@ -398,6 +374,28 @@ export class ExtendedService {
 
         return rounded.toFixed(precision);
     }
+    // Быстрый метод для Auto-Close
+    public async getSimplePositions(): Promise<IDetailedPosition[]> {
+        try {
+            const positionsResponse = await this.getUserPositions();
+            if (positionsResponse.status !== 'OK' || !Array.isArray(positionsResponse.data)) {
+                return [];
+            }
 
-
+            return positionsResponse.data
+                .filter(p => p.status === 'OPENED')
+                .map(position => ({
+                    coin: position.market.replace(/-USD$/, ''),
+                    notional: '0',
+                    size: Math.abs(parseFloat(position.size)),
+                    side: position.side === 'LONG' ? 'L' : 'S',
+                    exchange: 'E',
+                    fundingRate: 0,
+                    entryPrice: 0
+                }));
+        } catch (err) {
+            console.error('[Extended] Simple positions error:', err);
+            return [];
+        }
+    }
 }

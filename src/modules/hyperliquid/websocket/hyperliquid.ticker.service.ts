@@ -4,105 +4,173 @@ type PriceUpdateCallback = (bid: string, ask: string) => void;
 
 export class HyperliquidTickerService {
     private ws: WebSocket | null = null;
-    // Хранение активного символа для фильтрации
     private activeSymbol: string | null = null;
 
-    constructor() { }
+    // --- WATCHDOG ---
+    private lastUpdateTimestamp: number = 0;
+    private watchdogInterval: NodeJS.Timeout | null = null;
+    private readonly STALE_DATA_TIMEOUT = 15000; // 15 секунд тишины = реконнект
+    private isReconnecting = false;
+
+    private readonly isTestnet: boolean;
+
+    constructor() {
+        this.isTestnet = process.env.TESTNET === 'true';
+    }
 
     public start(symbol: string, callback: PriceUpdateCallback): Promise<void> {
+        const targetSymbol = symbol;
+
+        // 1. Если меняем монету — сбрасываем старое
+        if (this.ws && this.activeSymbol !== targetSymbol) {
+            console.log(`Switching Hyperliquid from ${this.activeSymbol} to ${targetSymbol}.`);
+            this.stop();
+        }
+
+        this.activeSymbol = targetSymbol;
+        this.lastUpdateTimestamp = Date.now(); // Сброс таймера
+
         return new Promise((resolve, reject) => {
-
-            // --- ИСПРАВЛЕНИЕ: Умная нормализация символа ---
-            // 1. Сначала приводим к верхнему регистру для проверки
-            let targetSymbol = symbol
-
-            // 1. УПРАВЛЕНИЕ СОЕДИНЕНИЕМ
-            if (this.ws) {
-                // Если уже подписаны на ЭТУ ЖЕ монету - всё ок
-                if (this.activeSymbol === targetSymbol && this.ws.readyState === WebSocket.OPEN) {
-                    console.log(`Hyperliquid WebSocket already connected to ${targetSymbol}.`);
-                    resolve();
-                    return;
-                }
-
-                // Если монета ДРУГАЯ - закрываем старый сокет
-                console.log(`Switching Hyperliquid from ${this.activeSymbol} to ${targetSymbol}. Reconnecting...`);
-                this.stop();
+            // Если уже подключены
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                resolve();
+                return;
             }
 
-            // 2. ЗАПОМИНАЕМ НОВЫЙ СИМВОЛ (уже правильный, например kBONK)
-            this.activeSymbol = targetSymbol;
-
-            this.ws = new WebSocket('wss://api.hyperliquid.xyz/ws');
-            const currentConnection = this.ws;
-
-            currentConnection.on('open', () => {
-                console.log(`Connected to Hyperliquid WebSocket for ${targetSymbol}.`);
-
-                // Подписываемся на L2 Book
-                const subscriptionMessage = {
-                    method: 'subscribe',
-                    subscription: {
-                        type: 'l2Book',
-                        coin: targetSymbol // Отправляем kBONK
-                    },
-                };
-                currentConnection.send(JSON.stringify(subscriptionMessage));
-                resolve();
-            });
-
-            currentConnection.on('error', (error) => {
-                console.error('Hyperliquid WebSocket error:', error);
-                this.ws = null;
-                this.activeSymbol = null;
-                reject(error);
-            });
-
-            currentConnection.on('close', (code, reason) => {
-                console.log(`Hyperliquid WebSocket disconnected: ${code} - ${reason.toString()}`);
-                if (this.ws === currentConnection) {
-                    this.ws = null;
-                    this.activeSymbol = null;
-                }
-                if (code !== 1000) {
-                    // reject сработает только при ошибке старта
-                }
-            });
-
-            currentConnection.on('message', (data: WebSocket.Data) => {
-                try {
-                    const message = JSON.parse(data.toString());
-
-                    if (message.channel === 'l2Book' && message.data) {
-                        const bookData = message.data;
-
-                        // === ФИЛЬТРАЦИЯ ===
-                        // Hyperliquid вернет coin: "kBONK".
-                        // Мы сравниваем с this.activeSymbol, который тоже теперь "kBONK".
-                        if (bookData.coin !== this.activeSymbol) {
-                            return;
-                        }
-
-                        if (bookData.levels && bookData.levels.length === 2) {
-                            const bestBid = bookData.levels[0][0].px;
-                            const bestAsk = bookData.levels[1][0].px;
-                            callback(bestBid, bestAsk);
-                        }
-                    }
-                } catch (error) {
-                    console.error('Error parsing Hyperliquid message:', error);
-                }
-            });
+            try {
+                this.connectSocket(targetSymbol, callback, resolve, reject);
+                this.startWatchdog(callback);
+            } catch (e) {
+                reject(e);
+            }
         });
     }
 
-    public stop(): void {
-        if (this.ws) {
-            console.log('Disconnecting from Hyperliquid WebSocket...');
-            this.ws.removeAllListeners();
-            this.ws.close(1000, 'Client initiated stop');
-            this.ws = null;
+    private connectSocket(
+        symbol: string,
+        callback: PriceUpdateCallback,
+        resolve?: () => void,
+        reject?: (err: any) => void
+    ) {
+        // Выбираем URL в зависимости от режима
+        const wsUrl = this.isTestnet
+            //  ? 'wss://api.hyperliquid-testnet.xyz/ws'
+            ? 'wss://api.hyperliquid.xyz/ws'
+            : 'wss://api.hyperliquid.xyz/ws';
+
+        console.log(`Attempting to connect to Hyperliquid WebSocket (${symbol}) at ${wsUrl}...`);
+
+        this.ws = new WebSocket(wsUrl);
+        const currentConnection = this.ws;
+
+        currentConnection.on('open', () => {
+            if (this.activeSymbol !== symbol) {
+                currentConnection.close();
+                return;
+            }
+            console.log(`✅ Connected to Hyperliquid WS for ${symbol}.`);
+
+            // Подписываемся на L2 Book
+            const subscriptionMessage = {
+                method: 'subscribe',
+                subscription: {
+                    type: 'l2Book',
+                    coin: symbol
+                },
+            };
+            currentConnection.send(JSON.stringify(subscriptionMessage));
+
+            if (resolve) resolve();
+        });
+
+        currentConnection.on('error', (error) => {
+            console.error('Hyperliquid WS error:', error);
+            if (reject) reject(error);
+        });
+
+        currentConnection.on('close', (code, reason) => {
+            if (this.ws === currentConnection && code !== 1000) {
+                console.warn(`Hyperliquid WS disconnected (${code}). Watchdog will handle reconnect.`);
+            }
+        });
+
+        currentConnection.on('message', (data: WebSocket.Data) => {
+            if (this.activeSymbol !== symbol) return;
+
+            // !!! ОБНОВЛЯЕМ ПУЛЬС !!!
+            this.lastUpdateTimestamp = Date.now();
+
+            try {
+                const message = JSON.parse(data.toString());
+
+                if (message.channel === 'l2Book' && message.data) {
+                    const bookData = message.data;
+
+                    // Проверка, что данные именно для нашей монеты
+                    if (bookData.coin !== this.activeSymbol) return;
+
+                    // levels[0] = bids, levels[1] = asks
+                    if (bookData.levels && bookData.levels.length >= 2) {
+                        // Структура: levels[0][0].px
+                        const bids = bookData.levels[0];
+                        const asks = bookData.levels[1];
+
+                        if (bids.length > 0 && asks.length > 0) {
+                            const bestBid = bids[0].px;
+                            const bestAsk = asks[0].px;
+                            callback(bestBid, bestAsk);
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Error parsing Hyperliquid message:', error);
+            }
+        });
+    }
+
+    private startWatchdog(callback: PriceUpdateCallback) {
+        if (this.watchdogInterval) clearInterval(this.watchdogInterval);
+
+        this.watchdogInterval = setInterval(async () => {
+            if (!this.activeSymbol || this.isReconnecting) return;
+
+            const timeSinceLastUpdate = Date.now() - this.lastUpdateTimestamp;
+
+            if (timeSinceLastUpdate > this.STALE_DATA_TIMEOUT) {
+                console.warn(`🚨 [Hyperliquid] STALE DATA! No data for ${timeSinceLastUpdate}ms. Reconnecting...`);
+                this.isReconnecting = true;
+
+                try {
+                    // 1. Закрываем (false = не сбрасывать символ)
+                    this.stop(false);
+
+                    // 2. Переподключаемся
+                    this.connectSocket(this.activeSymbol, callback);
+
+                    this.lastUpdateTimestamp = Date.now();
+                    console.log('✅ [Hyperliquid] Reconnected via Watchdog.');
+                } catch (e) {
+                    console.error('❌ [Hyperliquid] Reconnect failed:', e);
+                } finally {
+                    this.isReconnecting = false;
+                }
+            }
+        }, 5000);
+    }
+
+    public stop(clearSymbol: boolean = true): void {
+        if (clearSymbol) {
             this.activeSymbol = null;
+            if (this.watchdogInterval) {
+                clearInterval(this.watchdogInterval);
+                this.watchdogInterval = null;
+            }
+        }
+
+        if (this.ws) {
+            this.ws.removeAllListeners();
+            this.ws.close(1000, 'Client stop');
+            this.ws = null;
         }
     }
 }

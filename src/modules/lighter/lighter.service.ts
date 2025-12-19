@@ -1,7 +1,10 @@
 import axios from 'axios';
-import { Injectable } from '@nestjs/common'; // Если используете NestJS DI
+import { Injectable } from '@nestjs/common';
 import { LighterClient, ORDER_TYPE } from './lighter.client';
 import { IExchangeData, IDetailedPosition, ILighterApiResponse, IFundingRatesResponseLighter } from '../../common/interfaces';
+
+// Константа таймаута
+const HTTP_TIMEOUT = 10000;
 
 @Injectable()
 export class LighterService {
@@ -9,7 +12,6 @@ export class LighterService {
     private readonly API_URL: string;
     private readonly l1Address: string;
 
-    // Переменные для инициализации клиента
     private readonly privateKey: string;
     private readonly apiKeyIndex: number;
     private readonly accountIndex: string | number;
@@ -17,15 +19,12 @@ export class LighterService {
     private tradeClient: LighterClient;
 
     constructor() {
-        // 1. Определяем режим работы
         this.isTestnet = process.env.TESTNET === 'true';
 
-        // 2. Настраиваем переменные в зависимости от режима
         if (this.isTestnet) {
             console.log('🟡 [Lighter] Initializing in TESTNET mode');
             this.API_URL = 'https://testnet.zklighter.elliot.ai/api/v1';
 
-            // Тестовые ключи из .env
             this.l1Address = process.env.LIGHTER_L1_ADDRESS_TEST || '';
             this.privateKey = process.env.LIGHTER_API_KEY_PRIVATE_KEY_TEST || '';
             this.apiKeyIndex = Number(process.env.LIGHTER_API_KEY_INDEX_TEST || 0);
@@ -34,51 +33,45 @@ export class LighterService {
             console.log('🟢 [Lighter] Initializing in MAINNET mode');
             this.API_URL = 'https://mainnet.zklighter.elliot.ai/api/v1';
 
-            // Боевые ключи из .env
             this.l1Address = process.env.LIGHTER_L1_ADDRESS || '';
             this.privateKey = process.env.LIGHTER_API_KEY_PRIVATE_KEY || '';
             this.apiKeyIndex = Number(process.env.LIGHTER_API_KEY_INDEX || 0);
             this.accountIndex = process.env.LIGHTER_ACCOUNT_INDEX || 0;
         }
 
-        // 3. Валидация обязательных полей
         if (!this.l1Address) {
             throw new Error(`Lighter L1 Address is missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'} mode.`);
         }
         if (!this.privateKey) {
-            console.warn(`⚠️ [Lighter] Private Key missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'}. Trading functions will not work.`);
+            console.warn(`⚠️ [Lighter] Private Key missing. Trading functions will not work.`);
         }
 
-        // 4. Инициализация торгового клиента
         this.tradeClient = new LighterClient({
-            // Удаляем /api/v1, так как клиент сам добавляет пути, или используем как base
-            // В нашем Client коде мы добавляли /api/v1 вручную, поэтому передаем чистый хост
             baseUrl: this.API_URL.replace('/api/v1', ''),
             privateKey: this.privateKey,
             apiKeyIndex: this.apiKeyIndex,
             accountIndex: this.accountIndex,
-            // 300 для тестнета Arbitrum Sepolia, для мейнета обычно подхватывается дефолт или 1/42161
             chainId: this.isTestnet ? 300 : undefined
         });
 
         this.tradeClient.init().catch(e => console.error('Lighter Client Init Error:', e));
     }
+
     public async checkSymbolExists(coin: string): Promise<boolean> {
-        // Убеждаемся, что клиент инициализирован и рынки загружены
         if (!this.tradeClient.isInitialized) {
             await this.tradeClient.init();
         }
-
         const marketId = this.tradeClient.getMarketId(coin);
         return marketId !== null;
     }
+
     public getMarketId(symbol: string): number | null {
-        // Вызываем метод клиента, который у тебя уже есть
         return this.tradeClient.getMarketId(symbol);
     }
 
     private getErrorMessage(error: unknown): string {
         if (axios.isAxiosError(error)) {
+            if (error.code === 'ECONNABORTED') return 'Network Timeout';
             return JSON.stringify(error.response?.data) || error.message;
         }
         if (error instanceof Error) {
@@ -87,11 +80,15 @@ export class LighterService {
         return String(error);
     }
 
+    // --- Data Methods with Timeouts ---
+
     private async getAccountData(): Promise<ILighterApiResponse> {
         try {
             const url = `${this.API_URL}/account?by=l1_address&value=${this.l1Address}`;
+            // Добавил таймаут
             const response = await axios.get<ILighterApiResponse>(url, {
-                headers: { 'accept': 'application/json' }
+                headers: { 'accept': 'application/json' },
+                timeout: HTTP_TIMEOUT
             });
             return response.data;
         } catch (error) {
@@ -99,29 +96,21 @@ export class LighterService {
         }
     }
 
-    // --- НОВАЯ ФУНКЦИЯ ---
-    /**
-     * Получает и форматирует информацию об открытых позициях в унифицированный вид.
-     * @returns Промис, который разрешается массивом детализированных позиций.
-     */
     public async getDetailedPositions(): Promise<IDetailedPosition[]> {
         try {
-            // 1. Запрашиваем данные аккаунта и фандинги параллельно
+            // Добавил таймаут в запрос фандинга
             const [accountResponse, fundingResponse] = await Promise.all([
                 this.getAccountData(),
-                axios.get<IFundingRatesResponseLighter>(`${this.API_URL}/funding-rates`)
+                axios.get<IFundingRatesResponseLighter>(`${this.API_URL}/funding-rates`, { timeout: HTTP_TIMEOUT })
             ]);
 
-            // 2. Достаем нужные объекты из ответов
             const account = accountResponse?.accounts?.[0];
             const fundingRates = fundingResponse?.data?.funding_rates;
 
-            // Если аккаунта нет или нет позиций — возвращаем пустой массив
             if (!account || !account.positions) {
                 return [];
             }
 
-            // 3. Создаем карту фандинга (Symbol -> Rate)
             const fundingMap = new Map<string, number>();
             if (Array.isArray(fundingRates)) {
                 fundingRates
@@ -129,36 +118,23 @@ export class LighterService {
                     .forEach(rate => fundingMap.set(rate.symbol, rate.rate));
             }
 
-            // 4. Маппинг позиций
             const detailedPositions: IDetailedPosition[] = account.positions
-                // Фильтруем: оставляем только те, где размер позиции не 0
                 .filter(p => parseFloat(p.position || '0') !== 0)
                 .map(position => {
-                    // Название монеты (например "MNT", "ETH")
                     const coin = position.symbol || 'UNKNOWN';
-
-                    // Фандинг (в процентах)
                     const fundingRate = (fundingMap.get(coin) || 0) * 100;
-
-                    // Парсим строковые значения в числа
                     const rawSize = parseFloat(position.position || '0');
                     const rawValue = parseFloat(position.position_value || '0');
-
-                    // Lighter отдает цену входа прямо в ответе, используем её!
-                    // Если вдруг поля нет, будет 0.
                     const entryPrice = parseFloat(position.avg_entry_price || '0');
 
                     return {
                         coin: coin,
-                        // Notional (Объем в $) = abs(position_value)
                         notional: Math.abs(rawValue).toString(),
-                        // Размер в монетах = abs(position)
                         size: Math.abs(rawSize),
-                        // Направление: 1 = Long, -1 = Short
                         side: position.sign === 1 ? 'L' : 'S',
-                        exchange: 'L', // Метка биржи Lighter
+                        exchange: 'L',
                         fundingRate: fundingRate,
-                        entryPrice: entryPrice // <--- Точная цена из API
+                        entryPrice: entryPrice
                     };
                 });
 
@@ -167,10 +143,11 @@ export class LighterService {
         } catch (err) {
             const message = this.getErrorMessage(err);
             console.error('Error fetching Lighter detailed positions:', err);
-            // Возвращаем пустой массив при ошибке, чтобы не крашить весь дешборд
             return [];
         }
     }
+
+    // --- Trading Methods ---
 
     public async calculateLeverage(): Promise<IExchangeData> {
         try {
@@ -201,7 +178,8 @@ export class LighterService {
             const denominator = totalAssetValue - maintenanceMargin;
 
             if (denominator <= 0) {
-                throw new Error('Cannot calculate leverage: Invalid denominator.');
+                // Если маржа почти кончилась, возвращаем высокое плечо
+                return { leverage: 999, accountEquity: totalAssetValue, P_MM_keff };
             }
 
             const leverage = totalPositionValue / denominator;
@@ -217,6 +195,7 @@ export class LighterService {
             throw new Error(`Failed to calculate Lighter leverage: ${message}`);
         }
     }
+
     public async placeOrder(
         symbol: string,
         side: 'BUY' | 'SELL',
@@ -224,8 +203,11 @@ export class LighterService {
         type: 'LIMIT' | 'MARKET' = 'LIMIT',
         price?: number
     ) {
-        // 1. АВТОМАТИЧЕСКИЙ ПОИСК MARKET ID
-        // Мы передаем название монеты (напр. "ADA" или "ZK")
+        // Убеждаемся, что клиент инициализирован перед отправкой
+        if (!this.tradeClient.isInitialized) {
+            await this.tradeClient.init();
+        }
+
         const marketId = this.tradeClient.getMarketId(symbol);
 
         if (marketId === null) {
@@ -237,7 +219,6 @@ export class LighterService {
         const isAsk = side === 'SELL';
         const orderType = type === 'MARKET' ? ORDER_TYPE.MARKET : ORDER_TYPE.LIMIT;
 
-        // 2. Отправляем ордер с найденным ID
         const result = await this.tradeClient.placeOrder({
             marketId,
             isAsk,
@@ -249,7 +230,6 @@ export class LighterService {
 
         console.log(`✅ [Lighter] Order SENT. TxHash: ${result.txHash}`);
 
-        // 3. Polling
         const fallbackPrice = price || 0;
         const fillDetails = await this.pollTransactionDetails(
             result.txHash,
@@ -266,16 +246,16 @@ export class LighterService {
         };
     }
 
-    // --- ЛОГИКА ОБРАБОТКИ ОТВЕТА API ---
     private async pollTransactionDetails(txHash: string, marketId: number, fallbackQty: number, fallbackPrice: number) {
         const maxAttempts = 20;
 
         for (let i = 0; i < maxAttempts; i++) {
             await new Promise(r => setTimeout(r, 1000));
 
+            // Этот метод внутри tradeClient (getTransactionByHash) тоже должен быть защищен таймаутом, 
+            // если вы имеете доступ к его коду.
             const txData = await this.tradeClient.getTransactionByHash(txHash);
 
-            // Если транзакция найдена (API вернуло 200 и данные)
             if (txData && txData.event_info) {
                 console.log(`✅ [Lighter] Transaction confirmed on attempt ${i + 1}!`);
 
@@ -283,7 +263,6 @@ export class LighterService {
                     const eventInfo = JSON.parse(txData.event_info);
                     const trade = eventInfo.t;
 
-                    // ВАРИАНТ А: СДЕЛКА ПРОШЛА (FILLED)
                     if (trade && parseFloat(trade.s) > 0) {
                         const market = this.tradeClient.markets[marketId];
                         const sizeMult = 10 ** market.sizeDecimals;
@@ -306,15 +285,12 @@ export class LighterService {
                             status: status
                         };
                     }
-
-                    // ВАРИАНТ Б: СДЕЛКИ НЕТ, НО ТРАНЗАКЦИЯ УСПЕШНА (OPEN / MAKER)
-                    // Это значит, ордер встал в стакан.
                     else {
                         console.log(`🕒 [Lighter] Order placed in book (Maker). No fill yet.`);
                         return {
-                            avgPrice: fallbackPrice, // Возвращаем лимитную цену
-                            filledQty: fallbackQty,  // Возвращаем объем ордера
-                            status: 'OPEN'           // Новый статус
+                            avgPrice: fallbackPrice,
+                            filledQty: fallbackQty,
+                            status: 'OPEN'
                         };
                     }
 
@@ -322,7 +298,6 @@ export class LighterService {
                     console.warn('[Lighter] JSON parse error:', e);
                 }
             }
-            // Если txData нет (404), цикл продолжается...
         }
 
         console.log(`\n⚠️ [Lighter] Tx polling timeout. Assuming success.`);
@@ -332,5 +307,38 @@ export class LighterService {
             filledQty: fallbackQty,
             status: 'ASSUMED_FILLED'
         };
+    }
+    // --- Оптимизированный метод для Auto-Close ---
+    // Убрали запрос funding-rates
+    public async getSimplePositions(): Promise<IDetailedPosition[]> {
+        try {
+            // Только 1 запрос!
+            const response = await this.getAccountData();
+            const account = response?.accounts?.[0];
+
+            if (!account || !account.positions) {
+                return [];
+            }
+
+            return account.positions
+                .filter(p => parseFloat(p.position || '0') !== 0)
+                .map(position => {
+                    const rawSize = parseFloat(position.position || '0');
+
+                    return {
+                        coin: position.symbol || 'UNKNOWN',
+                        notional: '0',
+                        size: Math.abs(rawSize),
+                        side: position.sign === 1 ? 'L' : 'S',
+                        exchange: 'L',
+                        fundingRate: 0, // Не тратим время
+                        entryPrice: 0
+                    };
+                });
+
+        } catch (err) {
+            console.error('[Lighter] Simple positions error:', err);
+            return [];
+        }
     }
 }

@@ -193,7 +193,7 @@ export class BinanceService {
 
             const [positions, fundingInfoResponse] = await Promise.all([
                 this.getPositionInfo(), // Позиции берем с текущего аккаунта (Testnet или Prod)
-                axios.get(fundingUrl).catch(() => ({ data: [] })), // Если упадет, вернем пустой массив (безопасно)
+                axios.get(fundingUrl, { timeout: 10000 }).catch(() => ({ data: [] })), // Если упадет, вернем пустой массив (безопасно)
             ]);
 
             const fundingIntervals = new Map<string, number>();
@@ -217,7 +217,7 @@ export class BinanceService {
                 // Добавим try-catch для запроса цены, чтобы не ломать всё из-за одной монеты
                 let premiumIndexData: any = { lastFundingRate: '0' };
                 try {
-                    const res = await axios.get(premUrl);
+                    const res = await axios.get(premUrl, { timeout: 5000 });
                     premiumIndexData = res.data;
                 } catch (e) {
                     console.warn(`[Binance] Failed to fetch premiumIndex for ${symbol}`);
@@ -422,11 +422,36 @@ export class BinanceService {
         const url = `${baseUrl}/fapi/v1/ticker/24hr?symbol=${encodeURIComponent(symbol)}`;
 
         try {
-            const res = await axios.get(url);
+            const res = await axios.get(url, { timeout: 5000 });
             return res.data as IExchangeData;
         } catch (e) {
             console.error(`Error getting exchange data for ${symbol}:`, e);
             throw e;
+        }
+    }
+    // Быстрый метод для Auto-Close (без фандинга и цен)
+    public async getSimplePositions(): Promise<IDetailedPosition[]> {
+        try {
+            // Только 1 запрос!
+            const positions = await this.getPositionInfo();
+
+            return positions
+                .filter(p => p.positionAmt && parseFloat(p.positionAmt) !== 0)
+                .map(p => {
+                    const amt = parseFloat(p.positionAmt!);
+                    return {
+                        coin: p.symbol!.replace(/USDT|USDC$/, ''), // Упрощенная нормализация
+                        notional: '0', // Не тратим время на расчет
+                        size: Math.abs(amt),
+                        side: amt > 0 ? 'L' : 'S',
+                        exchange: 'B',
+                        fundingRate: 0, // Не нужно
+                        entryPrice: 0   // Не нужно
+                    };
+                });
+        } catch (err) {
+            console.error('[Binance] Simple positions error:', err);
+            return [];
         }
     }
 }

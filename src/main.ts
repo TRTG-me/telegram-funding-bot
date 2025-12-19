@@ -226,7 +226,8 @@ async function start() {
                     //return binanceTickerController.startTicker(ctx);
                     return autoCloseController.handleManualCheck(ctx);
                 case '🛑 Остановить тикер':
-                    return binanceTickerController.stopTicker(ctx);
+                    //return binanceTickerController.stopTicker(ctx);
+                    return autoCloseController.handleToggleMonitor(ctx);
                 case 'bp':
                     return bpController.handleBpCommand(ctx);
                 case 'OPEN POS':
