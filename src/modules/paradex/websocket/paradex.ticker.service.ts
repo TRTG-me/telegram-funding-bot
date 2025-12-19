@@ -8,14 +8,23 @@ interface OrderLevel {
     size: string;
 }
 
+// Константы
+const HTTP_TIMEOUT = 10000;
+const STALE_DATA_TIMEOUT = 10000; // 10 секунд тишины = реконнект
+
 export class ParadexTickerService {
     private ws: WebSocket | null = null;
     private subscriptionId: number = 1;
-
-    // Храним активный символ для защиты от гонки данных при переключении
     private activeSymbol: string | null = null;
 
-    // Заголовки как у браузера (обязательно для RPI канала)
+    // --- WATCHDOG ---
+    private lastUpdateTimestamp: number = 0;
+    private watchdogInterval: NodeJS.Timeout | null = null;
+    private isReconnecting = false;
+
+    // Храним tickSizeStr, чтобы при реконнекте не запрашивать его заново по HTTP
+    private currentTickSizeStr: string | null = null;
+
     private readonly headers = {
         'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
         'Origin': 'https://app.paradex.trade'
@@ -24,140 +33,189 @@ export class ParadexTickerService {
     constructor() { }
 
     /**
-     * 1. Получает информацию о рынке через REST API.
-     * 2. Извлекает price_tick_size (например "0.01").
-     * 3. Форматирует для вебсокета ("0_01").
+     * Получает tick_size с таймаутом
      */
     private async getFormattedTickSize(symbol: string): Promise<string> {
         try {
             const url = `https://api.prod.paradex.trade/v1/markets?market=${symbol}`;
-            const res = await axios.get(url, { headers: this.headers });
+            const res = await axios.get(url, {
+                headers: this.headers,
+                timeout: HTTP_TIMEOUT
+            });
 
             if (res.data && res.data.results && res.data.results.length > 0) {
-                const tickSize = res.data.results[0].price_tick_size; // "0.01"
+                const tickSize = res.data.results[0].price_tick_size;
                 if (tickSize) {
-                    // Заменяем точку на нижнее подчеркивание
                     return tickSize.toString().replace('.', '_');
                 }
             }
             throw new Error('Tick size not found');
         } catch (e: any) {
             console.warn(`[ParadexTicker] Failed to get tick size for ${symbol}, using default 0_01. Error: ${e.message}`);
-            return '0_01'; // Безопасный фоллбэк
+            return '0_01';
         }
     }
 
     public async start(symbol: string, callback: PriceUpdateCallback): Promise<void> {
-        // 1. Управление соединением
-        if (this.ws) {
-            if (this.activeSymbol === symbol && this.ws.readyState === WebSocket.OPEN) {
-                console.log(`Paradex WebSocket already active for ${symbol}.`);
-                return;
-            }
+        // 1. Смена монеты
+        if (this.ws && this.activeSymbol !== symbol) {
             console.log(`Switching Paradex ticker to ${symbol}...`);
             this.stop();
         }
 
         this.activeSymbol = symbol;
+        this.lastUpdateTimestamp = Date.now();
 
-        // 2. Получаем правильный шаг цены для формирования канала
+        // 2. Получаем (или обновляем) tick size только при первом старте
+        // При реконнекте watchdog'ом мы будем использовать уже сохраненный
         const tickSizeStr = await this.getFormattedTickSize(symbol);
-
-        // Формируем точное имя канала RPI
-        // Пример: order_book.ETH-USD-PERP.interactive@15@100ms@0_01
-        const channelName = `order_book.${symbol}.interactive@15@100ms@${tickSizeStr}`;
-
-        console.log(`[ParadexTicker] Connecting to RPI channel: ${channelName}`);
+        this.currentTickSizeStr = tickSizeStr;
 
         return new Promise((resolve, reject) => {
-            const connectionUrl = 'wss://ws.api.prod.paradex.trade/v1?cancel-on-disconnect=false';
-
-            this.ws = new WebSocket(connectionUrl, { headers: this.headers });
-            const currentConnection = this.ws;
-
-            currentConnection.on('open', () => {
-                // Защита от смены монеты во время коннекта
-                if (this.activeSymbol !== symbol) {
-                    currentConnection.close();
-                    return;
-                }
-
-                console.log(`Connected to Paradex WS.`);
-
-                const subscriptionMessage = {
-                    jsonrpc: "2.0",
-                    method: "subscribe",
-                    params: { channel: channelName },
-                    id: this.subscriptionId++
-                };
-                currentConnection.send(JSON.stringify(subscriptionMessage));
-
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                 resolve();
-            });
+                return;
+            }
 
-            currentConnection.on('error', (error) => {
-                console.error('Paradex WebSocket error:', error);
-                this.ws = null;
-                this.activeSymbol = null;
-                reject(error);
-            });
-
-            currentConnection.on('close', (code) => {
-                console.log(`Paradex WS disconnected: ${code}`);
-                if (this.ws === currentConnection) {
-                    this.ws = null;
-                    this.activeSymbol = null;
-                }
-            });
-
-            currentConnection.on('message', (data: WebSocket.Data) => {
-                // Фильтрация чужих сообщений (если успели переключиться)
-                if (this.activeSymbol !== symbol) return;
-
-                try {
-                    const message = JSON.parse(data.toString());
-
-                    // Проверяем, что это сообщение с данными
-                    if (message.method === 'subscription' && message.params && message.params.data) {
-                        const payload = message.params.data;
-
-                        // RPI канал присылает inserts (массив ордеров)
-                        // Нам нужно найти лучший Bid (макс цена) и лучший Ask (мин цена) внутри этого пакета
-
-                        if (payload.inserts && Array.isArray(payload.inserts)) {
-                            let bestBid = 0;
-                            let bestAsk = Infinity;
-
-                            for (const order of payload.inserts) {
-                                const price = parseFloat(order.price);
-
-                                if (order.side === 'BUY') {
-                                    if (price > bestBid) bestBid = price;
-                                } else if (order.side === 'SELL') {
-                                    if (price < bestAsk) bestAsk = price;
-                                }
-                            }
-
-                            // Если нашли цены, отправляем в колбэк
-                            if (bestBid > 0 && bestAsk !== Infinity) {
-                                callback(bestBid.toString(), bestAsk.toString());
-                            }
-                        }
-                    }
-                } catch (error) {
-                    console.error('Error parsing Paradex message:', error);
-                }
-            });
+            try {
+                this.connectSocket(symbol, tickSizeStr, callback, resolve, reject);
+                this.startWatchdog(callback);
+            } catch (e) {
+                reject(e);
+            }
         });
     }
 
-    public stop(): void {
-        if (this.ws) {
-            console.log('Disconnecting from Paradex WebSocket...');
-            this.ws.removeAllListeners();
-            this.ws.close(1000);
-            this.ws = null;
+    private connectSocket(
+        symbol: string,
+        tickSizeStr: string,
+        callback: PriceUpdateCallback,
+        resolve?: () => void,
+        reject?: (err: any) => void
+    ) {
+        // Формируем канал: order_book.ETH-USD-PERP.interactive@15@100ms@0_01
+        const channelName = `order_book.${symbol}.interactive@15@100ms@${tickSizeStr}`;
+        const connectionUrl = 'wss://ws.api.prod.paradex.trade/v1?cancel-on-disconnect=false';
+
+        console.log(`[Paradex] Connecting to RPI channel: ${channelName}`);
+
+        this.ws = new WebSocket(connectionUrl, { headers: this.headers });
+        const currentConnection = this.ws;
+
+        currentConnection.on('open', () => {
+            if (this.activeSymbol !== symbol) {
+                currentConnection.close();
+                return;
+            }
+
+            console.log(`✅ Connected to Paradex WS.`);
+
+            const subscriptionMessage = {
+                jsonrpc: "2.0",
+                method: "subscribe",
+                params: { channel: channelName },
+                id: this.subscriptionId++
+            };
+            currentConnection.send(JSON.stringify(subscriptionMessage));
+
+            if (resolve) resolve();
+        });
+
+        currentConnection.on('error', (error) => {
+            console.error('Paradex WS error:', error);
+            if (reject) reject(error);
+        });
+
+        currentConnection.on('close', (code) => {
+            if (this.ws === currentConnection) {
+                if (code !== 1000) {
+                    console.warn(`Paradex WS disconnected (${code}). Watchdog will handle reconnect.`);
+                }
+            }
+        });
+
+        currentConnection.on('message', (data: WebSocket.Data) => {
+            if (this.activeSymbol !== symbol) return;
+
+            // !!! ПУЛЬС !!!
+            this.lastUpdateTimestamp = Date.now();
+
+            try {
+                const message = JSON.parse(data.toString());
+
+                if (message.method === 'subscription' && message.params && message.params.data) {
+                    const payload = message.params.data;
+
+                    if (payload.inserts && Array.isArray(payload.inserts)) {
+                        let bestBid = 0;
+                        let bestAsk = Infinity;
+
+                        for (const order of payload.inserts) {
+                            const price = parseFloat(order.price);
+                            if (order.side === 'BUY') {
+                                if (price > bestBid) bestBid = price;
+                            } else if (order.side === 'SELL') {
+                                if (price < bestAsk) bestAsk = price;
+                            }
+                        }
+
+                        if (bestBid > 0 && bestAsk !== Infinity) {
+                            callback(bestBid.toString(), bestAsk.toString());
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Error parsing Paradex message:', error);
+            }
+        });
+    }
+
+    private startWatchdog(callback: PriceUpdateCallback) {
+        if (this.watchdogInterval) clearInterval(this.watchdogInterval);
+
+        this.watchdogInterval = setInterval(async () => {
+            if (!this.activeSymbol || this.isReconnecting) return;
+
+            const timeSinceLastUpdate = Date.now() - this.lastUpdateTimestamp;
+
+            if (timeSinceLastUpdate > STALE_DATA_TIMEOUT) {
+                console.warn(`🚨 [Paradex] STALE DATA! No data for ${timeSinceLastUpdate}ms. Reconnecting...`);
+                this.isReconnecting = true;
+
+                try {
+                    // 1. Закрываем старое
+                    this.stop(false);
+
+                    // 2. Используем сохраненный tickSize, чтобы не делать лишний HTTP запрос
+                    const tickStr = this.currentTickSizeStr || '0_01';
+
+                    this.connectSocket(this.activeSymbol, tickStr, callback);
+
+                    this.lastUpdateTimestamp = Date.now();
+                    console.log('✅ [Paradex] Reconnected via Watchdog.');
+                } catch (e) {
+                    console.error('❌ [Paradex] Reconnect failed:', e);
+                } finally {
+                    this.isReconnecting = false;
+                }
+            }
+        }, 5000);
+    }
+
+    public stop(clearSymbol: boolean = true): void {
+        if (clearSymbol) {
             this.activeSymbol = null;
+            this.currentTickSizeStr = null;
+            if (this.watchdogInterval) {
+                clearInterval(this.watchdogInterval);
+                this.watchdogInterval = null;
+            }
+        }
+
+        if (this.ws) {
+            this.ws.removeAllListeners();
+            this.ws.close(1000, 'Client stop');
+            this.ws = null;
         }
     }
 }

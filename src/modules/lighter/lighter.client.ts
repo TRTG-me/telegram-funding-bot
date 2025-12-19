@@ -1,6 +1,9 @@
 import axios from 'axios';
 import * as adapter from './signer.adapter';
 
+// Константа таймаута
+const HTTP_TIMEOUT = 10000;
+
 export interface LighterConfig {
     baseUrl: string;
     privateKey: string;
@@ -26,10 +29,7 @@ export class LighterClient {
     private accountIndex: bigint;
     private chainId: number;
 
-    // Хранилище: ID -> Детали маркета (для decimals)
     public markets: Record<number, any> = {};
-
-    // Хранилище для поиска: "ADA" -> 10, "ZK" -> 2050
     private symbolToId: Map<string, number> = new Map();
 
     public isInitialized = false;
@@ -50,13 +50,13 @@ export class LighterClient {
         await this._loadMarkets();
         this._initSigner();
         this.isInitialized = true;
-        // console.log('[LighterClient] Initialized.');
     }
 
     private async _loadMarkets() {
         try {
             const url = `${this.baseUrl}/api/v1/orderBooks`;
-            const res = await axios.get(url);
+            // Добавлен таймаут
+            const res = await axios.get(url, { timeout: HTTP_TIMEOUT });
 
             const list = res.data?.order_books || [];
 
@@ -64,17 +64,13 @@ export class LighterClient {
                 let perpCount = 0;
 
                 list.forEach((m: any) => {
-                    // ===============================================
-                    // 🔥 ВАЖНО: ФИЛЬТРУЕМ ТОЛЬКО PERP (ФЬЮЧЕРСЫ)
-                    // ===============================================
                     if (m.market_type !== 'perp') {
-                        return; // Игнорируем Spot и другие типы
+                        return;
                     }
 
                     perpCount++;
                     const id = parseInt(m.market_id);
 
-                    // 1. Сохраняем детали
                     this.markets[id] = {
                         id: id,
                         symbol: m.symbol,
@@ -84,31 +80,22 @@ export class LighterClient {
                         minQuoteAmount: parseFloat(m.min_quote_amount)
                     };
 
-                    // 2. Маппинг символов (Только для Perps)
                     const rawSymbol = m.symbol.toUpperCase();
-
-                    // А. Сохраняем оригинал: "ETH-USDC" -> 0
                     this.symbolToId.set(rawSymbol, id);
 
-                    // Б. Если есть дефис, сохраняем короткое имя: "ETH" -> 0
                     if (rawSymbol.includes('-')) {
                         const cleanTicker = rawSymbol.split('-')[0];
                         this.symbolToId.set(cleanTicker, id);
                     }
 
-                    // В. Если есть слэш: "ZK/USDC" -> "ZK" -> ID
                     if (rawSymbol.includes('/')) {
                         const cleanTicker = rawSymbol.split('/')[0];
                         this.symbolToId.set(cleanTicker, id);
                     }
 
-                    // Г. Спец. маппинг для обернутых токенов (WETH -> ETH)
-                    // Часто на Lighter перп называется "WETH-USDC", а мы пишем "ETH"
                     if (rawSymbol.startsWith('WETH')) this.symbolToId.set('ETH', id);
                     if (rawSymbol.startsWith('WBTC')) this.symbolToId.set('BTC', id);
                 });
-
-                // console.log(`[LighterClient] Loaded ${perpCount} PERP markets.`);
             } else {
                 console.warn('[LighterClient] No markets found in API response');
             }
@@ -117,15 +104,11 @@ export class LighterClient {
         }
     }
 
-    // --- ГЛАВНЫЙ МЕТОД ПОИСКА ---
     public getMarketId(coin: string): number | null {
         const ticker = coin.toUpperCase();
-
-        // 1. Прямой поиск (ADA -> ADA)
         if (this.symbolToId.has(ticker)) {
             return this.symbolToId.get(ticker)!;
         }
-
         return null;
     }
 
@@ -136,13 +119,15 @@ export class LighterClient {
 
     async getNextNonce(): Promise<bigint> {
         const url = `${this.baseUrl}/api/v1/nextNonce?account_index=${this.accountIndex}&api_key_index=${this.apiKeyIndex}`;
-        const res = await axios.get(url);
+        // Добавлен таймаут
+        const res = await axios.get(url, { timeout: HTTP_TIMEOUT });
         return BigInt(res.data.nonce);
     }
 
     async getOrderBook(marketId: number) {
         const url = `${this.baseUrl}/api/v1/orderBookOrders?market_id=${marketId}&limit=50`;
-        const res = await axios.get(url);
+        // Добавлен таймаут
+        const res = await axios.get(url, { timeout: HTTP_TIMEOUT });
         if (!res.data) throw new Error(`OrderBook orders for market ${marketId} unavailable`);
         return res.data;
     }
@@ -151,7 +136,8 @@ export class LighterClient {
         try {
             const cleanHash = hash.replace('0x', '');
             const url = `${this.baseUrl}/api/v1/tx?by=hash&value=${cleanHash}`;
-            const res = await axios.get(url);
+            // Добавлен таймаут
+            const res = await axios.get(url, { timeout: HTTP_TIMEOUT });
             return res.data;
         } catch (e: any) {
             if (e.response && e.response.status === 404) return null;
@@ -207,8 +193,10 @@ export class LighterClient {
         formData.append('tx_info', signedTx.txInfo);
         formData.append('price_protection', 'false');
 
+        // Добавлен таймаут
         const response = await axios.post(sendUrl, formData, {
-            headers: { 'Content-Type': 'multipart/form-data' }
+            headers: { 'Content-Type': 'multipart/form-data' },
+            timeout: HTTP_TIMEOUT
         });
 
         return {

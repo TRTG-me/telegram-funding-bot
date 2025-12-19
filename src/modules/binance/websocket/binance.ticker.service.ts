@@ -3,15 +3,19 @@ import {
     DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS_PROD_URL
 } from '@binance/derivatives-trading-usds-futures';
 
-// Определяем тип для callback-функции
 type PriceUpdateCallback = (bid: string, ask: string) => void;
 
 export class BinanceTickerService {
     private client: DerivativesTradingUsdsFutures;
     private connection: any = null;
-
-    // Храним активный символ для фильтрации "чужих" пакетов
     private activeSymbol: string | null = null;
+
+    // --- НОВОЕ: Для защиты от протухания ---
+    private lastUpdateTimestamp: number = 0;
+    private watchdogInterval: NodeJS.Timeout | null = null;
+    private readonly STALE_DATA_TIMEOUT = 10000; // 10 секунд тишины = смерть
+    private isReconnecting = false;
+    // ---------------------------------------
 
     constructor() {
         this.client = new DerivativesTradingUsdsFutures({
@@ -21,85 +25,119 @@ export class BinanceTickerService {
         });
     }
 
-    /**
-     * Запускает WebSocket-поток и возвращает Promise
-     */
     public start(symbol: string, callback: PriceUpdateCallback): Promise<void> {
-        // 1. Запоминаем текущий активный символ (в верхнем регистре, т.к. Binance шлет так)
-        this.activeSymbol = symbol
+        this.activeSymbol = symbol;
+
+        // Сбрасываем таймер "свежести" перед стартом
+        this.lastUpdateTimestamp = Date.now();
 
         return new Promise(async (resolve, reject) => {
+            // Если уже есть соединение, просто выходим (фильтр по activeSymbol сработает)
             if (this.connection) {
                 console.warn('Binance WebSocket connection is already active.');
-                // Даже если соединение активно, мы обновили activeSymbol выше,
-                // поэтому фильтр начнет пропускать только новую монету (если подписка обновилась).
                 resolve();
                 return;
             }
 
             try {
-                console.log(`Attempting to connect to Binance WebSocket for ${symbol}...`);
-                this.connection = await this.client.websocketStreams.connect();
-                console.log('Binance WebSocket connection established.');
+                await this.connectSocket(symbol, callback);
 
-                const stream = this.connection.partialBookDepthStreams({
-                    symbol: symbol.toLowerCase(),
-                    levels: 5,
-                    updateSpeed: '100ms',
-                });
+                // --- НОВОЕ: Запускаем сторожевого пса ---
+                this.startWatchdog(callback);
 
-                stream.on('message', (data: any) => {
-                    // === ФИЛЬТРАЦИЯ (Race Condition Fix) ===
-                    // Binance в поле 's' присылает символ (например "BTCUSDT").
-                    // Если пришел пакет не для той монеты, которую мы сейчас ждем — игнорируем.
-                    if (data.s && data.s.toUpperCase() !== this.activeSymbol) {
-                        return;
-                    }
-
-                    if (data && data.b && data.b.length > 0 && data.a && data.a.length > 0) {
-                        const bestBid = data.b[0][0];
-                        const bestAsk = data.a[0][0];
-                        callback(bestBid, bestAsk);
-                    }
-                });
-
-                this.connection.on('close', (code: number) => {
-                    // Сбрасываем активный символ при разрыве
-                    this.activeSymbol = null;
-
-                    if (code !== 1000) {
-                        console.error(`Binance WebSocket disconnected unexpectedly with code: ${code}`);
-                        this.connection = null;
-                        reject(new Error(`Binance disconnected unexpectedly with code: ${code}`));
-                    }
-                });
-
-                console.log(`Subscribed to partial book depth stream for ${symbol}.`);
                 resolve();
-
             } catch (error) {
-                console.error('Failed to start Binance WebSocket stream:', error);
-                this.connection = null;
-                this.activeSymbol = null;
                 reject(error);
             }
         });
     }
 
-    /**
-     * Останавливает и отключает WebSocket-поток.
-     */
-    public async stop(): Promise<void> {
-        // Сбрасываем символ, чтобы даже если прилетят остаточные пакеты, они не прошли фильтр
-        this.activeSymbol = null;
+    // Вынес логику подключения в отдельный метод для удобства реконнекта
+    private async connectSocket(symbol: string, callback: PriceUpdateCallback) {
+        console.log(`Attempting to connect to Binance WebSocket for ${symbol}...`);
+        this.connection = await this.client.websocketStreams.connect();
+        console.log('Binance WebSocket connection established.');
 
-        if (this.connection && typeof this.connection.disconnect === 'function') {
-            console.log('Disconnecting from Binance WebSocket...');
+        const stream = this.connection.partialBookDepthStreams({
+            symbol: symbol.toLowerCase(),
+            levels: 5,
+            updateSpeed: '100ms',
+        });
+
+        stream.on('message', (data: any) => {
+            // 1. Обновляем время последнего пакета
+            this.lastUpdateTimestamp = Date.now();
+
+            if (data.s && data.s.toUpperCase() !== this.activeSymbol) {
+                return;
+            }
+
+            if (data && data.b && data.b.length > 0 && data.a && data.a.length > 0) {
+                const bestBid = data.b[0][0];
+                const bestAsk = data.a[0][0];
+                callback(bestBid, bestAsk);
+            }
+        });
+
+        this.connection.on('close', (code: number) => {
+            console.log(`Binance socket closed code: ${code}`);
+            this.connection = null;
+            // Если это не штатное закрытие и мы не в процессе реконнекта - можно попробовать переподключиться
+            // Но watchdog и так это сделает
+        });
+    }
+
+    private startWatchdog(callback: PriceUpdateCallback) {
+        if (this.watchdogInterval) clearInterval(this.watchdogInterval);
+
+        this.watchdogInterval = setInterval(async () => {
+            // Если мы не отслеживаем ничего или уже переподключаемся — пропускаем
+            if (!this.activeSymbol || this.isReconnecting) return;
+
+            const timeSinceLastUpdate = Date.now() - this.lastUpdateTimestamp;
+
+            if (timeSinceLastUpdate > this.STALE_DATA_TIMEOUT) {
+                console.warn(`🚨 STALE DATA DETECTED! No data for ${timeSinceLastUpdate}ms. Reconnecting...`);
+                this.isReconnecting = true;
+
+                try {
+                    // 1. Жестко убиваем старое соединение
+                    await this.stop(false); // false = не сбрасывать activeSymbol
+
+                    // 2. Пробуем подключиться заново
+                    await this.connectSocket(this.activeSymbol, callback);
+
+                    // 3. Обновляем таймстемп, чтобы ватчдог сразу не сработал снова
+                    this.lastUpdateTimestamp = Date.now();
+                    console.log('✅ Reconnection successful via Watchdog.');
+                } catch (e) {
+                    console.error('❌ Reconnection failed:', e);
+                } finally {
+                    this.isReconnecting = false;
+                }
+            }
+        }, 5000); // Проверяем каждые 5 секунд
+    }
+
+    public async stop(clearSymbol: boolean = true): Promise<void> {
+        if (clearSymbol) {
+            this.activeSymbol = null;
+            if (this.watchdogInterval) {
+                clearInterval(this.watchdogInterval);
+                this.watchdogInterval = null;
+            }
+        }
+
+        if (this.connection) {
             try {
-                await this.connection.disconnect(1000);
-                console.log('Binance WebSocket disconnected successfully.');
+                // Пытаемся закрыть
+                if (typeof this.connection.disconnect === 'function') {
+                    await this.connection.disconnect();
+                } else if (typeof this.connection.close === 'function') {
+                    this.connection.close();
+                }
             } catch (error) {
-                console.error('Error during Binance WebSocket disconnection:', error);
+                // Игнорируем ошибки при закрытии
             } finally {
                 this.connection = null;
             }

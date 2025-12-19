@@ -4,110 +4,159 @@ type PriceUpdateCallback = (bid: string, ask: string) => void;
 
 export class ExtendedTickerService {
     private ws: WebSocket | null = null;
-    // Добавляем хранение текущего символа
     private activeSymbol: string | null = null;
+
+    // --- WATCHDOG (ЗАЩИТА ОТ ПРОТУХАНИЯ) ---
+    private lastUpdateTimestamp: number = 0;
+    private watchdogInterval: NodeJS.Timeout | null = null;
+    private readonly STALE_DATA_TIMEOUT = 20000; // 20 секунд тишины = реконнект
+    private isReconnecting = false;
 
     constructor() { }
 
     public start(symbol: string, callback: PriceUpdateCallback): Promise<void> {
-        return new Promise((resolve, reject) => {
-            const upperSymbol = symbol
+        // 1. Сбрасываем старое, если символ сменился
+        if (this.ws && this.activeSymbol !== symbol) {
+            console.log(`Switching Extended ticker from ${this.activeSymbol} to ${symbol}.`);
+            this.stop();
+        }
 
-            // 1. ПРОВЕРКА: Если сокет есть
-            if (this.ws) {
-                // Если мы уже подписаны на ЭТУ ЖЕ монету - всё ок, выходим
-                if (this.activeSymbol === upperSymbol && this.ws.readyState === WebSocket.OPEN) {
-                    console.log(`Extended WebSocket is already connected to ${upperSymbol}.`);
-                    resolve();
-                    return;
-                }
+        this.activeSymbol = symbol;
+        this.lastUpdateTimestamp = Date.now(); // Сброс таймера
 
-                // Если монета ДРУГАЯ - нужно закрыть старое соединение!
-                console.log(`Switching Extended ticker from ${this.activeSymbol} to ${upperSymbol}. Closing old connection...`);
-                this.stop();
-                // stop() синхронно закрывает и обнуляет this.ws, так что идем дальше создавать новый
+        return new Promise(async (resolve, reject) => {
+            // Если уже подключены к этому же символу
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                resolve();
+                return;
             }
 
-            // 2. ЗАПОМИНАЕМ НОВЫЙ СИМВОЛ
-            this.activeSymbol = upperSymbol;
+            try {
+                // Подключаемся
+                this.connectSocket(symbol, callback, resolve, reject);
 
-            // 3. СОЗДАЕМ НОВОЕ ПОДКЛЮЧЕНИЕ
-            // URL зависит от символа, поэтому для новой монеты нужен новый URL
-            const connectionUrl = `wss://api.starknet.extended.exchange/stream.extended.exchange/v1/orderbooks/${upperSymbol}?depth=1`;
-            const options = {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'
-                }
-            };
-
-            console.log(`Attempting to connect to Extended Exchange at: ${connectionUrl}`);
-            this.ws = new WebSocket(connectionUrl, options);
-            const currentConnection = this.ws;
-
-            currentConnection.on('open', () => {
-                // Дополнительная проверка на случай гонки (если пока коннектились, уже нажали стоп)
-                if (this.activeSymbol !== upperSymbol) {
-                    currentConnection.close();
-                    return;
-                }
-                console.log(`Successfully connected to Extended Exchange WebSocket for ${upperSymbol}. Waiting for data...`);
-                resolve();
-            });
-
-            currentConnection.on('error', (error) => {
-                console.error('Extended Exchange WebSocket error:', error);
-                this.ws = null;
-                this.activeSymbol = null;
-                reject(error);
-            });
-
-            currentConnection.on('close', (code, reason) => {
-                console.log(`Extended Exchange WebSocket disconnected: ${code} - ${reason.toString()}`);
-                if (code !== 1000) {
-                    // reject сработает только если это произошло ДО resolve (во время подключения)
-                    // после resolve это будет Unhandled Rejection, что не страшно, если есть защита в main.ts
-                    // Но для чистоты можно не реджектить, если уже открыто было.
-                }
-                // Не обнуляем this.ws здесь жестко, так как stop() делает это сам, 
-                // а это событие может прилететь с задержкой от старого сокета.
-                // Проверяем: это наш текущий сокет закрылся?
-                if (this.ws === currentConnection) {
-                    this.ws = null;
-                    this.activeSymbol = null;
-                }
-            });
-
-            currentConnection.on('message', (data: WebSocket.Data) => {
-                // ЗАЩИТА ОТ ГОНКИ ДАННЫХ
-                // Если этот сокет относится к символу, который нам уже не нужен - игнорируем
-                if (this.activeSymbol !== upperSymbol) return;
-
-                try {
-                    const message = JSON.parse(data.toString());
-                    if (message.type === 'SNAPSHOT' && message.data) {
-                        const priceData = message.data;
-                        if (priceData.b && priceData.b.length > 0 && priceData.a && priceData.a.length > 0) {
-                            const bestBid = priceData.b[0].p;
-                            const bestAsk = priceData.a[0].p;
-                            if (bestBid && bestAsk) {
-                                callback(bestBid, bestAsk);
-                            }
-                        }
-                    }
-                } catch (error) {
-                    console.error('Error parsing Extended Exchange message:', error);
-                }
-            });
+                // Запускаем охранника
+                this.startWatchdog(callback);
+            } catch (e) {
+                reject(e);
+            }
         });
     }
 
-    public stop(): void {
-        if (this.ws) {
-            console.log('Disconnecting from Extended Exchange WebSocket...');
-            this.ws.removeAllListeners(); // Убираем слушатели, чтобы не триггерить 'close' или 'error' после ручного закрытия
-            this.ws.close(1000, 'Client initiated stop');
-            this.ws = null;
+    private connectSocket(
+        symbol: string,
+        callback: PriceUpdateCallback,
+        resolve?: () => void,
+        reject?: (err: any) => void
+    ) {
+        const connectionUrl = `wss://api.starknet.extended.exchange/stream.extended.exchange/v1/orderbooks/${symbol}?depth=1`;
+        const options = {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'
+            }
+        };
+
+        console.log(`Attempting to connect to Extended Exchange (${symbol})...`);
+
+        this.ws = new WebSocket(connectionUrl, options);
+        const currentConnection = this.ws;
+
+        currentConnection.on('open', () => {
+            if (this.activeSymbol !== symbol) {
+                currentConnection.close();
+                return;
+            }
+            console.log(`✅ Connected to Extended WS for ${symbol}`);
+            if (resolve) resolve();
+        });
+
+        currentConnection.on('error', (error) => {
+            console.error('Extended WS error:', error);
+            if (reject) reject(error);
+        });
+
+        currentConnection.on('close', (code, reason) => {
+            // Если это не мы сами закрыли (не 1000), и это актуальный сокет
+            if (code !== 1000 && this.ws === currentConnection) {
+                console.warn(`Extended WS disconnected (${code}). Watchdog will handle reconnect.`);
+            }
+        });
+
+        currentConnection.on('message', (data: WebSocket.Data) => {
+            if (this.activeSymbol !== symbol) return;
+
+            // !!! ОБНОВЛЯЕМ ПУЛЬС !!!
+            this.lastUpdateTimestamp = Date.now();
+
+            try {
+                const message = JSON.parse(data.toString());
+
+                // Extended шлет SNAPSHOT при подключении и UPDATE при изменениях.
+                // Нам подходят оба, если там есть данные.
+                if (message.data) {
+                    const priceData = message.data;
+
+                    // Проверяем структуру (у Extended b/a - массивы объектов {p: price, s: size})
+                    if (priceData.b && priceData.b.length > 0 && priceData.a && priceData.a.length > 0) {
+                        const bestBid = priceData.b[0].p;
+                        const bestAsk = priceData.a[0].p;
+
+                        if (bestBid && bestAsk) {
+                            callback(bestBid, bestAsk);
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Error parsing Extended message:', error);
+            }
+        });
+    }
+
+    private startWatchdog(callback: PriceUpdateCallback) {
+        if (this.watchdogInterval) clearInterval(this.watchdogInterval);
+
+        this.watchdogInterval = setInterval(async () => {
+            // Если не активны или уже чинимся — выходим
+            if (!this.activeSymbol || this.isReconnecting) return;
+
+            const timeSinceLastUpdate = Date.now() - this.lastUpdateTimestamp;
+
+            if (timeSinceLastUpdate > this.STALE_DATA_TIMEOUT) {
+                console.warn(`🚨 [Extended] STALE DATA! No data for ${timeSinceLastUpdate}ms. Reconnecting...`);
+                this.isReconnecting = true;
+
+                try {
+                    // 1. Тихо закрываем старый сокет (false = не сбрасывать activeSymbol)
+                    this.stop(false);
+
+                    // 2. Создаем новый
+                    this.connectSocket(this.activeSymbol, callback);
+
+                    // 3. Обновляем время, чтобы сразу не сработало снова
+                    this.lastUpdateTimestamp = Date.now();
+                    console.log('✅ [Extended] Reconnected via Watchdog.');
+                } catch (e) {
+                    console.error('❌ [Extended] Reconnect failed:', e);
+                } finally {
+                    this.isReconnecting = false;
+                }
+            }
+        }, 5000); // Проверка каждые 5 сек
+    }
+
+    public stop(clearSymbol: boolean = true): void {
+        if (clearSymbol) {
             this.activeSymbol = null;
+            if (this.watchdogInterval) {
+                clearInterval(this.watchdogInterval);
+                this.watchdogInterval = null;
+            }
+        }
+
+        if (this.ws) {
+            this.ws.removeAllListeners();
+            this.ws.close(1000, 'Client stop');
+            this.ws = null;
         }
     }
 }
