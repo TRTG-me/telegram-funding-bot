@@ -163,7 +163,7 @@ export class BpController {
                 try {
                     await ctx.telegram.editMessageText(
                         userId, state.messageId, undefined,
-                        `❌ <b>Ошибка запуска:</b>\n${errorMessage}\n\nПопробуйте /bp еще раз.`,
+                        `❌ <b>Ошибка запуска:</b>\n${errorMessage}\n`,
                         { parse_mode: 'HTML' }
                     );
                 } catch { }

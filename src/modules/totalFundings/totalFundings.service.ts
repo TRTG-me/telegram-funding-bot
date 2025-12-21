@@ -102,7 +102,7 @@ export class TotalFundingsService {
             const fromTs = getUnixTime(subDays(new Date(), days));
             let annualizedPercentage = 0;
 
-            if (isHedged && item.coin === 'KBONK') {
+            if (isHedged && item.coin === 'BONK') {
 
                 const [longExchangeCode, shortExchangeCode] = item.exchanges.split('-');
                 const longFunding = await this._fetchIndividualFundingForKbonk(longExchangeCode, item.coin, fromTs, toTs);
