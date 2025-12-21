@@ -12,6 +12,10 @@ export class ExtendedTickerService {
     private readonly STALE_DATA_TIMEOUT = 20000; // 20 секунд тишины = реконнект
     private isReconnecting = false;
 
+    // --- ЛОГИКА ОГРАНИЧЕНИЯ ПОПЫТОК ---
+    private reconnectAttempts = 0;
+    private readonly MAX_RECONNECT_ATTEMPTS = 5; // После 10 неудач подряд выключаемся
+
     constructor() { }
 
     public start(symbol: string, callback: PriceUpdateCallback): Promise<void> {
@@ -23,6 +27,7 @@ export class ExtendedTickerService {
 
         this.activeSymbol = symbol;
         this.lastUpdateTimestamp = Date.now(); // Сброс таймера
+        this.reconnectAttempts = 0; // Сброс счетчика при ручном старте
 
         return new Promise(async (resolve, reject) => {
             // Если уже подключены к этому же символу
@@ -66,7 +71,12 @@ export class ExtendedTickerService {
                 currentConnection.close();
                 return;
             }
+
             console.log(`✅ Connected to Extended WS for ${symbol}`);
+
+            // !!! УСПЕХ: СБРАСЫВАЕМ СЧЕТЧИК НЕУДАЧ !!!
+            this.reconnectAttempts = 0;
+
             if (resolve) resolve();
         });
 
@@ -92,11 +102,9 @@ export class ExtendedTickerService {
                 const message = JSON.parse(data.toString());
 
                 // Extended шлет SNAPSHOT при подключении и UPDATE при изменениях.
-                // Нам подходят оба, если там есть данные.
                 if (message.data) {
                     const priceData = message.data;
 
-                    // Проверяем структуру (у Extended b/a - массивы объектов {p: price, s: size})
                     if (priceData.b && priceData.b.length > 0 && priceData.a && priceData.a.length > 0) {
                         const bestBid = priceData.b[0].p;
                         const bestAsk = priceData.a[0].p;
@@ -122,7 +130,17 @@ export class ExtendedTickerService {
             const timeSinceLastUpdate = Date.now() - this.lastUpdateTimestamp;
 
             if (timeSinceLastUpdate > this.STALE_DATA_TIMEOUT) {
-                console.warn(`🚨 [Extended] STALE DATA! No data for ${timeSinceLastUpdate}ms. Reconnecting...`);
+
+                // === ПРОВЕРКА НА ЛИМИТ ПОПЫТОК ===
+                if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
+                    console.error(`💥 [Extended] Max reconnect attempts (${this.MAX_RECONNECT_ATTEMPTS}) reached. Stopping ticker.`);
+                    this.stop(true); // Полная остановка
+                    return;
+                }
+
+                this.reconnectAttempts++;
+                console.warn(`🚨 [Extended] STALE DATA! Attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS}. Reconnecting...`);
+
                 this.isReconnecting = true;
 
                 try {
@@ -134,7 +152,7 @@ export class ExtendedTickerService {
 
                     // 3. Обновляем время, чтобы сразу не сработало снова
                     this.lastUpdateTimestamp = Date.now();
-                    console.log('✅ [Extended] Reconnected via Watchdog.');
+
                 } catch (e) {
                     console.error('❌ [Extended] Reconnect failed:', e);
                 } finally {
@@ -147,6 +165,7 @@ export class ExtendedTickerService {
     public stop(clearSymbol: boolean = true): void {
         if (clearSymbol) {
             this.activeSymbol = null;
+            this.reconnectAttempts = 0;
             if (this.watchdogInterval) {
                 clearInterval(this.watchdogInterval);
                 this.watchdogInterval = null;

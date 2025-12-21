@@ -21,24 +21,26 @@ export class LighterTickerService {
     // --- WATCHDOG ---
     private lastUpdateTimestamp: number = 0;
     private watchdogInterval: NodeJS.Timeout | null = null;
-    // 20 секунд для DEX нормально (учитывая пинги)
-    private readonly STALE_DATA_TIMEOUT = 20000;
+    private readonly STALE_DATA_TIMEOUT = 20000; // 20 сек тишины
     private isReconnecting = false;
+
+    // --- ЛОГИКА ОГРАНИЧЕНИЯ ПОПЫТОК ---
+    private reconnectAttempts = 0;
+    private readonly MAX_RECONNECT_ATTEMPTS = 5; // После 10 попыток сдаемся
 
     constructor() { }
 
     public start(marketIndex: string, callback: PriceUpdateCallback): Promise<void> {
-        // 1. Смена маркета
         if (this.ws && this.activeMarketIndex !== marketIndex) {
             console.log(`Switching Lighter from ${this.activeMarketIndex} to ${marketIndex}.`);
             this.stop();
         }
 
         this.activeMarketIndex = marketIndex;
-        this.lastUpdateTimestamp = Date.now(); // Сброс таймера
+        this.lastUpdateTimestamp = Date.now();
+        this.reconnectAttempts = 0; // Сброс счетчика при новом старте
 
         return new Promise((resolve, reject) => {
-            // Если уже подключены
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                 resolve();
                 return;
@@ -59,7 +61,6 @@ export class LighterTickerService {
         resolve?: () => void,
         reject?: (err: any) => void
     ) {
-        // Очищаем стакан перед новым подключением
         this.orderBookStates.delete(marketIndex);
 
         const connectionUrl = 'wss://mainnet.zklighter.elliot.ai/stream';
@@ -82,6 +83,10 @@ export class LighterTickerService {
             }
 
             console.log(`✅ Connected to Lighter WS. Subscribing to ${marketIndex}...`);
+
+            // !!! УСПЕХ: СБРАСЫВАЕМ СЧЕТЧИК НЕУДАЧ !!!
+            this.reconnectAttempts = 0;
+
             const subscriptionMessage = {
                 type: "subscribe",
                 channel: `order_book/${marketIndex}`
@@ -96,8 +101,6 @@ export class LighterTickerService {
 
         currentConnection.on('close', (code, reason) => {
             if (this.ws === currentConnection) {
-                // Не зануляем ws и activeMarketIndex здесь, если это реконнект
-                // Это сделает stop() или connectSocket при следующем вызове
                 if (code !== 1000) {
                     console.warn(`Lighter WS disconnected (${code}). Watchdog will handle reconnect.`);
                 }
@@ -116,14 +119,13 @@ export class LighterTickerService {
 
                 switch (messageType) {
                     case 'ping':
-                        // Пинг тоже считается активностью
                         currentConnection.send(JSON.stringify({ type: 'pong' }));
                         break;
 
                     case 'subscribed/order_book':
                         console.log(`Received SNAPSHOT for Lighter market ${marketIndex}.`);
                         this.orderBookStates.set(marketIndex, message.order_book);
-                        if (resolve) resolve(); // Успешный старт
+                        if (resolve) resolve();
                         break;
 
                     case 'update/order_book':
@@ -131,7 +133,6 @@ export class LighterTickerService {
                         break;
                 }
 
-                // Отправка данных
                 const currentState = this.orderBookStates.get(marketIndex);
                 if (currentState && currentState.bids.length > 0 && currentState.asks.length > 0) {
                     callback(currentState.bids[0].price, currentState.asks[0].price);
@@ -146,23 +147,33 @@ export class LighterTickerService {
         if (this.watchdogInterval) clearInterval(this.watchdogInterval);
 
         this.watchdogInterval = setInterval(async () => {
-            if (!this.activeMarketIndex || this.isReconnecting) return;
+            // Если мы уже остановлены (activeMarketIndex === null), ничего не делаем
+            if (!this.activeMarketIndex) return;
+            if (this.isReconnecting) return;
 
             const timeSinceLastUpdate = Date.now() - this.lastUpdateTimestamp;
 
             if (timeSinceLastUpdate > this.STALE_DATA_TIMEOUT) {
-                console.warn(`🚨 [Lighter] STALE DATA! No data/ping for ${timeSinceLastUpdate}ms. Reconnecting...`);
+
+                // === НОВАЯ ЛОГИКА: ПРОВЕРКА КОЛИЧЕСТВА ПОПЫТОК ===
+                if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
+                    console.error(`💥 [Lighter] Max reconnect attempts (${this.MAX_RECONNECT_ATTEMPTS}) reached. Stopping ticker service to avoid spam.`);
+
+                    // Полная остановка сервиса
+                    this.stop(true);
+                    return;
+                }
+
+                this.reconnectAttempts++;
+                console.warn(`🚨 [Lighter] STALE DATA! Attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS}. Reconnecting...`);
+
                 this.isReconnecting = true;
 
                 try {
-                    // 1. Закрываем старое (false = не сбрасывать активный маркет)
-                    this.stop(false);
-
-                    // 2. Открываем новое
+                    this.stop(false); // Мягкая остановка (без сброса activeMarketIndex)
                     this.connectSocket(this.activeMarketIndex, callback);
 
                     this.lastUpdateTimestamp = Date.now();
-                    console.log('✅ [Lighter] Reconnected via Watchdog.');
                 } catch (e) {
                     console.error('❌ [Lighter] Reconnect failed:', e);
                 } finally {
@@ -196,22 +207,20 @@ export class LighterTickerService {
     }
 
     public stop(clearMarket: boolean = true): void {
-        if (clearMarket) {
-            this.activeMarketIndex = null;
-            if (this.watchdogInterval) {
-                clearInterval(this.watchdogInterval);
-                this.watchdogInterval = null;
-            }
-        }
-
         if (this.ws) {
             this.ws.removeAllListeners();
             this.ws.close(1000, 'Client stop');
             this.ws = null;
         }
-        // Если полностью останавливаемся - чистим память стакана
-        if (clearMarket && this.activeMarketIndex) {
-            this.orderBookStates.delete(this.activeMarketIndex);
+
+        if (clearMarket) {
+            this.activeMarketIndex = null;
+            this.reconnectAttempts = 0; // Сброс при полной остановке
+            this.orderBookStates.clear();
+            if (this.watchdogInterval) {
+                clearInterval(this.watchdogInterval);
+                this.watchdogInterval = null;
+            }
         }
     }
 }
