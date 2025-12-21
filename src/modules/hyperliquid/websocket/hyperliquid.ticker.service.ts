@@ -12,6 +12,10 @@ export class HyperliquidTickerService {
     private readonly STALE_DATA_TIMEOUT = 15000; // 15 секунд тишины = реконнект
     private isReconnecting = false;
 
+    // --- ЛОГИКА ОГРАНИЧЕНИЯ ПОПЫТОК ---
+    private reconnectAttempts = 0;
+    private readonly MAX_RECONNECT_ATTEMPTS = 5; // После 10 неудач подряд выключаемся
+
     private readonly isTestnet: boolean;
 
     constructor() {
@@ -29,6 +33,7 @@ export class HyperliquidTickerService {
 
         this.activeSymbol = targetSymbol;
         this.lastUpdateTimestamp = Date.now(); // Сброс таймера
+        this.reconnectAttempts = 0; // Сброс счетчика при ручном старте
 
         return new Promise((resolve, reject) => {
             // Если уже подключены
@@ -54,8 +59,7 @@ export class HyperliquidTickerService {
     ) {
         // Выбираем URL в зависимости от режима
         const wsUrl = this.isTestnet
-            //  ? 'wss://api.hyperliquid-testnet.xyz/ws'
-            ? 'wss://api.hyperliquid.xyz/ws'
+            ? 'wss://api.hyperliquid-testnet.xyz/ws'
             : 'wss://api.hyperliquid.xyz/ws';
 
         console.log(`Attempting to connect to Hyperliquid WebSocket (${symbol}) at ${wsUrl}...`);
@@ -69,6 +73,9 @@ export class HyperliquidTickerService {
                 return;
             }
             console.log(`✅ Connected to Hyperliquid WS for ${symbol}.`);
+
+            // !!! УСПЕХ: СБРАСЫВАЕМ СЧЕТЧИК НЕУДАЧ !!!
+            this.reconnectAttempts = 0;
 
             // Подписываемся на L2 Book
             const subscriptionMessage = {
@@ -111,7 +118,6 @@ export class HyperliquidTickerService {
 
                     // levels[0] = bids, levels[1] = asks
                     if (bookData.levels && bookData.levels.length >= 2) {
-                        // Структура: levels[0][0].px
                         const bids = bookData.levels[0];
                         const asks = bookData.levels[1];
 
@@ -137,7 +143,17 @@ export class HyperliquidTickerService {
             const timeSinceLastUpdate = Date.now() - this.lastUpdateTimestamp;
 
             if (timeSinceLastUpdate > this.STALE_DATA_TIMEOUT) {
-                console.warn(`🚨 [Hyperliquid] STALE DATA! No data for ${timeSinceLastUpdate}ms. Reconnecting...`);
+
+                // === ПРОВЕРКА НА ЛИМИТ ПОПЫТОК ===
+                if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
+                    console.error(`💥 [Hyperliquid] Max reconnect attempts (${this.MAX_RECONNECT_ATTEMPTS}) reached. Stopping ticker.`);
+                    this.stop(true); // Полная остановка
+                    return;
+                }
+
+                this.reconnectAttempts++;
+                console.warn(`🚨 [Hyperliquid] STALE DATA! Attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS}. Reconnecting...`);
+
                 this.isReconnecting = true;
 
                 try {
@@ -148,7 +164,7 @@ export class HyperliquidTickerService {
                     this.connectSocket(this.activeSymbol, callback);
 
                     this.lastUpdateTimestamp = Date.now();
-                    console.log('✅ [Hyperliquid] Reconnected via Watchdog.');
+                    // Сообщение об успехе будет в on('open')
                 } catch (e) {
                     console.error('❌ [Hyperliquid] Reconnect failed:', e);
                 } finally {
@@ -161,6 +177,7 @@ export class HyperliquidTickerService {
     public stop(clearSymbol: boolean = true): void {
         if (clearSymbol) {
             this.activeSymbol = null;
+            this.reconnectAttempts = 0;
             if (this.watchdogInterval) {
                 clearInterval(this.watchdogInterval);
                 this.watchdogInterval = null;

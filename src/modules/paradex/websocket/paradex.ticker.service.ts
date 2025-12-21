@@ -22,6 +22,10 @@ export class ParadexTickerService {
     private watchdogInterval: NodeJS.Timeout | null = null;
     private isReconnecting = false;
 
+    // --- ЛОГИКА ОГРАНИЧЕНИЯ ПОПЫТОК ---
+    private reconnectAttempts = 0;
+    private readonly MAX_RECONNECT_ATTEMPTS = 5; // После 10 неудач подряд выключаемся
+
     // Храним tickSizeStr, чтобы при реконнекте не запрашивать его заново по HTTP
     private currentTickSizeStr: string | null = null;
 
@@ -65,6 +69,7 @@ export class ParadexTickerService {
 
         this.activeSymbol = symbol;
         this.lastUpdateTimestamp = Date.now();
+        this.reconnectAttempts = 0; // Сброс счетчика при ручном старте
 
         // 2. Получаем (или обновляем) tick size только при первом старте
         // При реконнекте watchdog'ом мы будем использовать уже сохраненный
@@ -79,6 +84,7 @@ export class ParadexTickerService {
 
             try {
                 this.connectSocket(symbol, tickSizeStr, callback, resolve, reject);
+                // Запускаем Watchdog, но передаем только callback (symbol берем из this.activeSymbol)
                 this.startWatchdog(callback);
             } catch (e) {
                 reject(e);
@@ -109,6 +115,9 @@ export class ParadexTickerService {
             }
 
             console.log(`✅ Connected to Paradex WS.`);
+
+            // !!! УСПЕХ: СБРАСЫВАЕМ СЧЕТЧИК НЕУДАЧ !!!
+            this.reconnectAttempts = 0;
 
             const subscriptionMessage = {
                 jsonrpc: "2.0",
@@ -179,14 +188,23 @@ export class ParadexTickerService {
             const timeSinceLastUpdate = Date.now() - this.lastUpdateTimestamp;
 
             if (timeSinceLastUpdate > STALE_DATA_TIMEOUT) {
-                console.warn(`🚨 [Paradex] STALE DATA! No data for ${timeSinceLastUpdate}ms. Reconnecting...`);
+
+                // === ПРОВЕРКА НА ЛИМИТ ПОПЫТОК ===
+                if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
+                    console.error(`💥 [Paradex] Max reconnect attempts (${this.MAX_RECONNECT_ATTEMPTS}) reached. Stopping ticker.`);
+                    this.stop(true); // Полная остановка
+                    return;
+                }
+
+                this.reconnectAttempts++;
+                console.warn(`🚨 [Paradex] STALE DATA! Attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS}. Reconnecting...`);
                 this.isReconnecting = true;
 
                 try {
                     // 1. Закрываем старое
                     this.stop(false);
 
-                    // 2. Используем сохраненный tickSize, чтобы не делать лишний HTTP запрос
+                    // 2. Используем сохраненный tickSize
                     const tickStr = this.currentTickSizeStr || '0_01';
 
                     this.connectSocket(this.activeSymbol, tickStr, callback);
@@ -206,6 +224,7 @@ export class ParadexTickerService {
         if (clearSymbol) {
             this.activeSymbol = null;
             this.currentTickSizeStr = null;
+            this.reconnectAttempts = 0; // Сброс при полной остановке
             if (this.watchdogInterval) {
                 clearInterval(this.watchdogInterval);
                 this.watchdogInterval = null;
@@ -214,7 +233,7 @@ export class ParadexTickerService {
 
         if (this.ws) {
             this.ws.removeAllListeners();
-            this.ws.close(1000, 'Client stop');
+            this.ws.close(1000);
             this.ws = null;
         }
     }

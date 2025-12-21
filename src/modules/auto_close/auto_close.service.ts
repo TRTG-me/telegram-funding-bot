@@ -10,28 +10,35 @@ import { ExchangeName } from '../auto_trade/auto_trade.service';
 import { IDetailedPosition } from '../../common/interfaces';
 
 // --- КОНФИГУРАЦИЯ РИСКОВ ---
-const TRIGGER_LEVERAGE = 5.8;       // Порог срабатывания (если плечо выше 5 -> режем)
-const TARGET_LEVERAGE = 5.2;      // Цель (режем до 4.5)
-const ALLOW_UNHEDGED_CLOSE = true;// Если хедж не найден/не сработал, закрывать ли основу?
+const TARGET_LEVERAGE = 5.7;        // Цель (куда возвращаемся)
+const WARN_LEVERAGE = 5.8;          // Желтая зона (только уведомление)
+const TRIGGER_LEVERAGE = 6;       // Красная зона (автоматическая резка)
+const ALLOW_UNHEDGED_CLOSE = true;
 
 // --- КОНФИГУРАЦИЯ ADL (Hyperliquid) ---
-const ADL_TRIGGER_PNL_RATIO = 0.3; // Если PnL > 50% от позиции -> риск ADL
-const ADL_TARGET_PNL_RATIO = 0.2;  // Срезаем, чтобы PnL стал 40%
+const ADL_TARGET_PNL_RATIO = 0.2;   // Цель (куда возвращаем PnL)
+const ADL_WARN_PNL_RATIO = 0.4;     // Желтая зона ADL (уведомление)
+const ADL_TRIGGER_PNL_RATIO = 0.5;  // Красная зона ADL (резка)
 
 // --- ТАЙМЕРЫ ---
-const NORMAL_INTERVAL_MS = 60 * 1000;      // 1 минута (Спокойный режим)
-const EMERGENCY_INTERVAL_MS = 20 * 1000;   // 20 секунд (Экстренный режим)
-const EMERGENCY_COOLDOWN_MS = 5 * 60 * 1000; // 5 минут тишины перед возвратом в норму
+const NORMAL_INTERVAL_MS = 30 * 1000;
+const EMERGENCY_INTERVAL_MS = 20 * 1000;
+const EMERGENCY_COOLDOWN_MS = 5 * 60 * 1000;
+const NOTIFICATION_COOLDOWN_MS = 1 * 60 * 1000; // Спамить не чаще раза в 5 мин
 
 @Injectable()
 export class AutoCloseService {
     private readonly logger = new Logger(AutoCloseService.name);
 
-    // Состояние мониторинга
     private isMonitoring = false;
     private isEmergencyMode = false;
     private lastActionTimestamp = 0;
     private monitoringTimeout: NodeJS.Timeout | null = null;
+
+    // Хранилище времени последнего уведомления (Key -> Timestamp)
+    // Key для плеча: "LEV_Hyperliquid"
+    // Key для ADL: "ADL_BTC"
+    private lastNotificationTime = new Map<string, number>();
 
     constructor(
         private binanceService: BinanceService,
@@ -67,6 +74,7 @@ export class AutoCloseService {
         this.isMonitoring = true;
         this.isEmergencyMode = false;
         this.lastActionTimestamp = 0;
+        this.lastNotificationTime.clear();
 
         notifyCallback('🛡 <b>Auto-Close + ADL Protection запущен.</b>\nИнтервал проверки: 1 минута.');
         this.logger.log('Started Auto-Close monitoring.');
@@ -86,7 +94,6 @@ export class AutoCloseService {
     private async runMonitoringLoop(notifyCallback: (msg: string) => Promise<void>) {
         if (!this.isMonitoring) return;
 
-        // Безопасная отправка, чтобы ошибка Телеграма не убила цикл
         const safeNotify = async (msg: string) => {
             try { await notifyCallback(msg); }
             catch (e) { this.logger.error(`Notify failed: ${e}`); }
@@ -95,10 +102,11 @@ export class AutoCloseService {
         try {
             // 1. ПРОВЕРКА РИСКОВ (ЛЕВЕРЕДЖ)
             const { logs: riskLogs, actionTaken: riskAction } = await this.checkAndReduceRisk();
-
+            console.log(`Risk Check Completed ${new Date().toLocaleString('ru-RU')}`);
             // 2. ПРОВЕРКА ADL (HYPERLIQUID PNL)
             const { logs: adlLogs, actionTaken: adlAction } = await this.checkAndFixHyperliquidADL();
 
+            // Действие было, если мы что-то реально РЕЗАЛИ (actionTaken = true возвращается только при TRIGGER)
             const actionTaken = riskAction || adlAction;
             const now = Date.now();
 
@@ -107,25 +115,24 @@ export class AutoCloseService {
                 this.lastActionTimestamp = now;
                 if (!this.isEmergencyMode) {
                     this.isEmergencyMode = true;
-                    await safeNotify('🚨 <b>ЭКСТРЕННЫЙ РЕЖИМ ВКЛЮЧЕН</b>\nОбнаружены риски. Интервал проверки: <b>20 сек</b>.');
+                    await safeNotify('🚨 <b>ЭКСТРЕННЫЙ РЕЖИМ ВКЛЮЧЕН</b>\nСработал триггер резки. Интервал: <b>20 сек</b>.');
                 }
             } else {
                 if (this.isEmergencyMode) {
-                    // Если прошло 5 минут без происшествий
                     if (now - this.lastActionTimestamp > EMERGENCY_COOLDOWN_MS) {
                         this.isEmergencyMode = false;
-                        await safeNotify('✅ <b>Риски устранены.</b>\n5 минут тишины. Возврат к интервалу: <b>1 минута</b>.');
+                        await safeNotify('✅ <b>Ситуация стабилизировалась.</b>\nВозврат к интервалу: <b>1 минута</b>.');
                     }
                 }
             }
 
             // 4. ОТПРАВКА ЛОГОВ
+            // Объединяем логи (там могут быть и уведомления о WARN, и отчеты о CUT)
             const allLogs = [...riskLogs, ...adlLogs].filter(l => !l.includes('✅ Все биржи в безопасности'));
 
             if (allLogs.length > 0) {
                 await safeNotify(allLogs.join('\n'));
             } else if (actionTaken && (riskLogs.length > 0 || adlLogs.length > 0)) {
-                // На случай если actionTaken=true, но логи стандартные
                 await safeNotify([...riskLogs, ...adlLogs].join('\n'));
             }
 
@@ -133,7 +140,6 @@ export class AutoCloseService {
             this.logger.error(`Monitoring Loop Error: ${e.message}`);
             await safeNotify(`❌ Ошибка цикла мониторинга: ${e.message}`);
         } finally {
-            // ГАРАНТИРОВАННЫЙ ПЕРЕЗАПУСК
             if (this.isMonitoring) {
                 const delay = this.isEmergencyMode ? EMERGENCY_INTERVAL_MS : NORMAL_INTERVAL_MS;
                 this.monitoringTimeout = setTimeout(() => this.runMonitoringLoop(notifyCallback), delay);
@@ -162,50 +168,69 @@ export class AutoCloseService {
                 const data = await exchangeServices[name].calculateLeverage();
                 return { name, ...data };
             } catch (e) {
-                return { name, leverage: 0 };
+                return { name, leverage: 0, accountEquity: 0, P_MM_keff: 0 };
             }
         };
 
-        // Собираем данные
         const allData = await Promise.all(Object.keys(exchangeServices).map(name => getLeverageData(name as ExchangeName)));
 
-        // Фильтруем опасные биржи
-        const dangerExchanges = allData
-            .filter(r => r.leverage >= TRIGGER_LEVERAGE)
-            .sort((a, b) => b.leverage - a.leverage);
+        // Сортируем биржи по убыванию плеча
+        const exchanges = allData.sort((a, b) => b.leverage - a.leverage);
 
-        if (dangerExchanges.length === 0) {
-            return {
-                logs: [`✅ Все биржи в безопасности (Leverage &lt; ${TRIGGER_LEVERAGE})`],
-                actionTaken: false
-            };
+        if (exchanges.length === 0) {
+            return { logs: [], actionTaken: false };
         }
 
-        actionTaken = true;
+        const maxLeverage = exchanges[0].leverage;
+        if (maxLeverage < WARN_LEVERAGE) {
+            // Все спокойно
+            // logs.push(`✅ Все биржи в безопасности (Max: ${maxLeverage.toFixed(2)})`);
+            return { logs: [], actionTaken: false };
+        }
 
-        for (const dangerEx of dangerExchanges) {
-            const freshData = await getLeverageData(dangerEx.name);
-            if (freshData.leverage < TRIGGER_LEVERAGE) {
-                logs.push(`ℹ️ Skipped ${dangerEx.name}: Leverage dropped to ${freshData.leverage.toFixed(2)}.`);
-                continue;
+        for (const ex of exchanges) {
+            const currentLev = ex.leverage;
+            const notifKey = `LEV_${ex.name}`;
+            const now = Date.now();
+
+            // --- 1. КРАСНАЯ ЗОНА (РЕЗКА) ---
+            if (currentLev >= TRIGGER_LEVERAGE) {
+                logs.push(`🚨 <b>TRIGGER: ${ex.name} Leverage: ${currentLev.toFixed(2)}</b> (Limit: ${TRIGGER_LEVERAGE})`);
+
+                // Re-Check перед действием
+                const freshData = await getLeverageData(ex.name);
+                if (freshData.leverage < TRIGGER_LEVERAGE) {
+                    logs.push(`ℹ️ Skipped ${ex.name}: Dropped to ${freshData.leverage.toFixed(2)}.`);
+                    continue;
+                }
+
+                const L1 = freshData.leverage;
+                const L2 = TARGET_LEVERAGE;
+                const K = freshData.P_MM_keff || 0;
+
+                let alpha = 0;
+                const denominator = L1 * (1 + L2 * K);
+
+                if (denominator !== 0) alpha = (L1 - L2) / denominator;
+                else alpha = (L1 - L2) / L1;
+                console.log(alpha)
+                if (alpha > 0.001) {
+                    logs.push(`🧮 Reducing by <b>${(alpha * 100).toFixed(2)}%</b> to target ${TARGET_LEVERAGE}`);
+                    const report = await this.reducePositionsOnExchange(ex.name, alpha, exchangeServices, allData);
+                    logs.push(...report);
+                    actionTaken = true; // Триггерим экстренный режим
+                }
             }
+            // --- 2. ЖЕЛТАЯ ЗОНА (УВЕДОМЛЕНИЕ) ---
+            else if (currentLev >= WARN_LEVERAGE) {
+                const lastNotif = this.lastNotificationTime.get(notifKey) || 0;
 
-            logs.push(`🚨 <b>ALARM: ${dangerEx.name} Leverage: ${freshData.leverage.toFixed(2)}</b>`);
-
-            const L1 = freshData.leverage;
-            const L2 = TARGET_LEVERAGE;
-            const alpha = (L1 - L2) / L1; // Упрощенная безопасная формула (без Кeff, чтобы наверняка)
-
-            if (alpha <= 0.001) {
-                logs.push(`⚠️ Alpha too small, skipping.`);
-                continue;
+                if (now - lastNotif > NOTIFICATION_COOLDOWN_MS) {
+                    logs.push(`⚠️ <b>WARNING: ${ex.name} Leverage: ${currentLev.toFixed(2)}</b>`);
+                    logs.push(`(Yellow Zone: ${WARN_LEVERAGE} - ${TRIGGER_LEVERAGE}). Please fix manually.`);
+                    this.lastNotificationTime.set(notifKey, now);
+                }
             }
-
-            logs.push(`🧮 Reducing by <b>${(alpha * 100).toFixed(2)}%</b>`);
-
-            // Передаем allData для приоритезации хеджей
-            const report = await this.reducePositionsOnExchange(dangerEx.name, alpha, exchangeServices, allData);
-            logs.push(...report);
         }
 
         return { logs, actionTaken };
@@ -217,13 +242,12 @@ export class AutoCloseService {
         allServices: Record<ExchangeName, any>,
         allLeverageData: { name: ExchangeName, leverage: number }[]
     ): Promise<string[]> {
+
         const service = allServices[exchangeName];
 
         try {
-            // ОПТИМИЗАЦИЯ: Используем getSimplePositions (быстро, без фандинга)
             const positions: IDetailedPosition[] = await service.getSimplePositions();
 
-            // Получаем позиции хеджеров
             const otherExchanges = Object.keys(allServices).filter(k => k !== exchangeName) as ExchangeName[];
             const allHedgePositions: Record<string, IDetailedPosition[]> = {};
 
@@ -233,40 +257,31 @@ export class AutoCloseService {
                 } catch (e) { allHedgePositions[exName] = []; }
             }));
 
-            // СОРТИРОВКА: Сначала используем хеджи на биржах с высоким плечом
             const sortedHedgeExchanges = Object.keys(allHedgePositions).sort((exA, exB) => {
                 const levA = allLeverageData.find(d => d.name === exA)?.leverage || 0;
                 const levB = allLeverageData.find(d => d.name === exB)?.leverage || 0;
-                return levB - levA; // Descending
+                return levB - levA;
             });
 
-            // --- ЗАДАЧИ ---
             const tasks = positions.map(pos => async () => {
                 const localLogs: string[] = [];
-
-                // Нормализация (kBONK -> BONK) для сравнения
                 const targetAsset = Helpers.getAssetName(pos.coin);
-
                 const rawTargetQty = pos.size * alpha;
                 let remainingQtyToClose = this.calculateSafeQuantity(rawTargetQty);
                 if (remainingQtyToClose <= 0) return [];
 
                 const closeSide = pos.side === 'L' ? 'SELL' : 'BUY';
 
-                // --- КАСКАДНЫЙ ПОИСК ХЕДЖЕЙ ---
                 for (const hedgeExName of sortedHedgeExchanges) {
                     if (remainingQtyToClose <= 0) break;
-
                     const hedgePosList = allHedgePositions[hedgeExName];
                     const hedgePos = hedgePosList.find(p => Helpers.getAssetName(p.coin) === targetAsset);
 
                     if (hedgePos && hedgePos.side !== pos.side) {
                         let qtyForThisHedge = Math.min(remainingQtyToClose, hedgePos.size);
                         qtyForThisHedge = this.calculateSafeQuantity(qtyForThisHedge);
-
                         if (qtyForThisHedge <= 0) continue;
 
-                        // Race Condition Fix: вычитаем из памяти
                         hedgePos.size -= qtyForThisHedge;
                         if (hedgePos.size < 0) hedgePos.size = 0;
 
@@ -275,47 +290,29 @@ export class AutoCloseService {
                         let pendingHedgeLog: string | null = null;
                         let pendingHedgeError: string | null = null;
 
-                        // 1. Закрываем Хедж
                         try {
-                            const res = await Helpers.executeTrade(
-                                hedgeExName as ExchangeName,
-                                hedgePos.coin,
-                                hedgeCloseSide,
-                                qtyForThisHedge,
-                                this.services
-                            );
-
+                            const res = await Helpers.executeTrade(hedgeExName as ExchangeName, hedgePos.coin, hedgeCloseSide, qtyForThisHedge, this.services);
                             if (res.success) {
                                 currentHedgeExecuted = true;
                                 pendingHedgeLog = `✅ Hedge closed on ${hedgeExName}: ${qtyForThisHedge}`;
                             } else {
                                 pendingHedgeError = `⚠️ Hedge fail on ${hedgeExName}: ${res.error}`;
-                                hedgePos.size += qtyForThisHedge; // Rollback при ошибке
+                                hedgePos.size += qtyForThisHedge;
                             }
                         } catch (e: any) {
                             pendingHedgeError = `⚠️ Hedge exc error on ${hedgeExName}: ${e.message}`;
-                            hedgePos.size += qtyForThisHedge; // Rollback
+                            hedgePos.size += qtyForThisHedge;
                         }
 
-                        // 2. Закрываем Основу
                         if (currentHedgeExecuted || ALLOW_UNHEDGED_CLOSE) {
                             try {
-                                const mainRes = await Helpers.executeTrade(
-                                    exchangeName,
-                                    pos.coin,
-                                    closeSide,
-                                    qtyForThisHedge,
-                                    this.services
-                                );
-
+                                const mainRes = await Helpers.executeTrade(exchangeName, pos.coin, closeSide, qtyForThisHedge, this.services);
                                 if (mainRes.success) {
                                     const exCodeMain = exchangeName.charAt(0);
                                     const hedgeSymbol = currentHedgeExecuted ? hedgeExName.charAt(0) : 'NO_HEDGE';
-
                                     localLogs.push(`✂️ <b>${pos.coin} ${exCodeMain}-${hedgeSymbol}</b>: ${qtyForThisHedge}`);
                                     if (pendingHedgeLog) localLogs.push(pendingHedgeLog);
                                     if (pendingHedgeError) localLogs.push(pendingHedgeError);
-
                                     remainingQtyToClose -= qtyForThisHedge;
                                     remainingQtyToClose = this.calculateSafeQuantity(remainingQtyToClose);
                                 } else {
@@ -331,13 +328,28 @@ export class AutoCloseService {
                         }
                     }
                 }
+
+                if (remainingQtyToClose > 0 && ALLOW_UNHEDGED_CLOSE) {
+                    if (remainingQtyToClose > 0) {
+                        try {
+                            const mainRes = await Helpers.executeTrade(exchangeName, pos.coin, closeSide, remainingQtyToClose, this.services);
+                            if (mainRes.success) {
+                                const exCodeMain = exchangeName.charAt(0);
+                                localLogs.push(`✂️ <b>${pos.coin} ${exCodeMain}-PANIC</b>: ${remainingQtyToClose} (Unhedged)`);
+                                remainingQtyToClose = 0;
+                            } else {
+                                localLogs.push(`❌ Panic Close Fail ${exchangeName} ${pos.coin}: ${mainRes.error}`);
+                            }
+                        } catch (e: any) {
+                            localLogs.push(`❌ Panic Exc Error: ${e.message}`);
+                        }
+                    }
+                }
                 return localLogs;
             });
 
-            // Для L2 лучше 1 поток
             const isL2Exchange = ['Lighter', 'Extended', 'Paradex'].includes(exchangeName);
             const concurrency = isL2Exchange ? 1 : 5;
-
             this.logger.log(`Reducing ${exchangeName} with concurrency: ${concurrency}`);
             const results = await this.runWithConcurrency(tasks, concurrency);
             return results.flat();
@@ -356,26 +368,22 @@ export class AutoCloseService {
         let actionTaken = false;
 
         try {
-            // ОПТИМИЗАЦИЯ: Используем getSimplePositions (он теперь возвращает PnL и Notional)
             const positions = await this.hyperliquidService.getSimplePositions();
 
             for (const pos of positions) {
-                // Пропускаем, если нет PnL (другие биржи) или ношнл 0
-                console.log(`Checking ADL for ${pos.coin}: PnL=${pos.unrealizedPnl}, Notional=${pos.notional}`);
                 if (pos.unrealizedPnl === undefined || pos.unrealizedPnl <= 0) continue;
-
                 const notional = parseFloat(pos.notional);
                 if (notional === 0) continue;
 
-                // Считаем Ratio: PnL / Notional
                 const currentRatio = pos.unrealizedPnl / notional;
-                console.log(`ADL Check ${pos.coin}: PnL=${pos.unrealizedPnl}, Notional=${notional}, Ratio=${currentRatio}`);
+                const notifKey = `ADL_${pos.coin}`;
+                const now = Date.now();
 
+                // --- 1. КРАСНАЯ ЗОНА (РЕЗКА) ---
                 if (currentRatio > ADL_TRIGGER_PNL_RATIO) {
                     actionTaken = true;
-                    logs.push(`⚠️ <b>ADL WARNING: ${pos.coin}</b> PnL Ratio: ${(currentRatio * 100).toFixed(1)}%`);
+                    logs.push(`⚠️ <b>ADL TRIGGER: ${pos.coin}</b> PnL Ratio: ${(currentRatio * 100).toFixed(1)}% (Limit: ${ADL_TRIGGER_PNL_RATIO * 100}%)`);
 
-                    // Расчет цикла
                     const rawCycleQty = pos.size * (1 - (ADL_TARGET_PNL_RATIO / currentRatio));
                     const cycleQty = this.calculateSafeQuantity(rawCycleQty);
 
@@ -389,14 +397,10 @@ export class AutoCloseService {
                     const closeSide = pos.side === 'L' ? 'SELL' : 'BUY';
                     const openSide = pos.side === 'L' ? 'BUY' : 'SELL';
 
-                    // 1. Закрываем
                     const closeRes = await Helpers.executeTrade('Hyperliquid', pos.coin, closeSide, cycleQty, this.services);
 
                     if (closeRes.success) {
-                        // Пауза перед открытием (защита от Sequence/Nonce errors)
                         await new Promise(r => setTimeout(r, 500));
-
-                        // 2. Открываем обратно
                         const openRes = await Helpers.executeTrade('Hyperliquid', pos.coin, openSide, cycleQty, this.services);
 
                         if (openRes.success) {
@@ -406,6 +410,15 @@ export class AutoCloseService {
                         }
                     } else {
                         logs.push(`❌ ADL Close Fail ${pos.coin}: ${closeRes.error}`);
+                    }
+                }
+                // --- 2. ЖЕЛТАЯ ЗОНА (УВЕДОМЛЕНИЕ) ---
+                else if (currentRatio > ADL_WARN_PNL_RATIO) {
+                    const lastNotif = this.lastNotificationTime.get(notifKey) || 0;
+                    if (now - lastNotif > NOTIFICATION_COOLDOWN_MS) {
+                        logs.push(`⚠️ <b>ADL WARNING: ${pos.coin}</b> PnL Ratio: ${(currentRatio * 100).toFixed(1)}%`);
+                        logs.push(`(Yellow Zone: ${ADL_WARN_PNL_RATIO * 100}% - ${ADL_TRIGGER_PNL_RATIO * 100}%). Consider fixing manually.`);
+                        this.lastNotificationTime.set(notifKey, now);
                     }
                 }
             }
@@ -423,11 +436,18 @@ export class AutoCloseService {
 
     private calculateSafeQuantity(amount: number): number {
         const absAmount = Math.abs(amount);
-        if (absAmount >= 10) return Math.floor(absAmount);
-        else if (absAmount >= 1) return Math.floor(absAmount * 10) / 10;
+        let result: number;
+
+        if (absAmount >= 10) result = Math.floor(absAmount);
+        else if (absAmount >= 1) result = Math.floor(absAmount * 10) / 10;
         else if (absAmount >= 0.1) return Math.floor(absAmount * 100) / 100;
         else if (absAmount >= 0.01) return Math.floor(absAmount * 1000) / 1000;
-        else return Math.floor(absAmount * 10000) / 10000;
+        else result = Math.floor(absAmount * 10000) / 10000;
+        // ФИНАЛЬНАЯ ЧИСТКА
+        // toFixed убирает мусор (1.12000001 -> "1.12")
+        // parseFloat превращает обратно в чистое число 1.12
+        // Используем 8 знаков, чтобы не потерять точность крипты
+        return parseFloat(result.toFixed(8));
     }
 
     private async runWithConcurrency<T>(tasks: (() => Promise<T>)[], concurrency: number): Promise<T[]> {

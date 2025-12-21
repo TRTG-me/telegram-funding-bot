@@ -15,6 +15,8 @@ export class BinanceTickerService {
     private watchdogInterval: NodeJS.Timeout | null = null;
     private readonly STALE_DATA_TIMEOUT = 10000; // 10 секунд тишины = смерть
     private isReconnecting = false;
+    private reconnectAttempts = 0;
+    private readonly MAX_RECONNECT_ATTEMPTS = 5; // Сдаемся после 10 попыток
     // ---------------------------------------
 
     constructor() {
@@ -97,26 +99,39 @@ export class BinanceTickerService {
             const timeSinceLastUpdate = Date.now() - this.lastUpdateTimestamp;
 
             if (timeSinceLastUpdate > this.STALE_DATA_TIMEOUT) {
-                console.warn(`🚨 STALE DATA DETECTED! No data for ${timeSinceLastUpdate}ms. Reconnecting...`);
+
+                // === ПРОВЕРКА НА ЛИМИТ ПОПЫТОК ===
+                if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
+                    console.error(`💥 [Binance] Max reconnect attempts (${this.MAX_RECONNECT_ATTEMPTS}) reached. Stopping ticker.`);
+                    // Полная остановка (очищает activeSymbol и убивает таймер)
+                    this.stop(true);
+                    return;
+                }
+
+                this.reconnectAttempts++;
+                console.warn(`🚨 [Binance] STALE DATA! Attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS}. Reconnecting...`);
+
                 this.isReconnecting = true;
 
                 try {
                     // 1. Жестко убиваем старое соединение
-                    await this.stop(false); // false = не сбрасывать activeSymbol
+                    await this.stop(false);
 
                     // 2. Пробуем подключиться заново
                     await this.connectSocket(this.activeSymbol, callback);
 
-                    // 3. Обновляем таймстемп, чтобы ватчдог сразу не сработал снова
+                    // 3. УСПЕХ: Сбрасываем счетчик неудач и обновляем время
+                    this.reconnectAttempts = 0;
                     this.lastUpdateTimestamp = Date.now();
                     console.log('✅ Reconnection successful via Watchdog.');
                 } catch (e) {
                     console.error('❌ Reconnection failed:', e);
+                    // Счетчик попыток НЕ сбрасываем, он продолжает расти
                 } finally {
                     this.isReconnecting = false;
                 }
             }
-        }, 5000); // Проверяем каждые 5 секунд
+        }, 5000);
     }
 
     public async stop(clearSymbol: boolean = true): Promise<void> {

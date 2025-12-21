@@ -303,8 +303,10 @@ export class ParadexService {
     // ТОРГОВЛЯ (UPDATED FOR RPI)
     // =================================================================
 
+
     private toQuantums(amount: number): string {
-        return (BigInt(Math.floor(amount * 100000000))).toString();
+        // 9.7 -> "9.70000000" -> "970000000"
+        return BigInt(amount.toFixed(8).replace('.', '')).toString();
     }
 
     public async placeMarketOrder(
@@ -315,16 +317,55 @@ export class ParadexService {
         try {
             console.log(`[Paradex ${this.isTestnet ? 'TEST' : 'PROD'}] Placing RPI MARKET ${side} ${quantity} ${symbol}`);
 
-            const timestampMs = await this.getServerTime() * 1000;
-            const sizeQuantums = this.toQuantums(quantity);
+            // 1. Получаем шаг размера ордера
+            let stepSize = 0.1;
+            try {
+                const infoRes = await axios.get(`${this.apiUrl}/markets?market=${symbol}`, {
+                    headers: BROWSER_HEADERS,
+                    timeout: 5000
+                });
+                if (infoRes.data?.results?.[0]?.order_size_increment) {
+                    stepSize = parseFloat(infoRes.data.results[0].order_size_increment);
+                }
+            } catch (e) {
+                console.warn(`[Paradex] Failed to fetch step size for ${symbol}, using default ${stepSize}`);
+            }
+
+            // === 2. МАТЕМАТИКА (Integer Math) ===
+            const MULTIPLIER = 100_000_000; // Точность 8 знаков
+
+            // Переводим входные данные в целые числа (квантумы)
+            const qtyQuantums = BigInt(Math.round(quantity * MULTIPLIER));
+            const stepQuantums = BigInt(Math.round(stepSize * MULTIPLIER));
+
+            if (stepQuantums === 0n) throw new Error('Invalid step size (0)');
+
+            // Округляем количество вниз до ближайшего шага (в целых числах)
+            const stepsCount = qtyQuantums / stepQuantums; // Деление BigInt отбрасывает остаток
+            const finalQuantums = stepsCount * stepQuantums;
+
+            // 1. Число для JSON (например 9.7)
+            const safeQty = Number(finalQuantums) / MULTIPLIER;
+
+            // 2. Строка для Подписи (например "970000000")
+            const sizeForSign = finalQuantums.toString();
+
+            if (safeQty <= 0) {
+                throw new Error(`Quantity ${quantity} is too small for step size ${stepSize}`);
+            }
+
+            // === 3. ПОДГОТОВКА ДАННЫХ ===
+            const timestampMs = Date.now(); // Миллисекунды
             const sideFlag = side === 'BUY' ? '1' : '2';
+
+            console.log(`[Paradex Debug] In: ${quantity} | Step: ${stepSize} | Safe: ${safeQty} | Sign: ${sizeForSign}`);
 
             const messageToSign = {
                 timestamp: timestampMs,
                 market: shortString.encodeShortString(symbol),
                 side: sideFlag,
                 orderType: shortString.encodeShortString('MARKET'),
-                size: sizeQuantums,
+                size: sizeForSign, // Используем вычисленные квантумы
                 price: '0'
             };
 
@@ -347,11 +388,12 @@ export class ParadexService {
             const { r, s } = ec.starkCurve.sign(msgHash, this.privateKey);
             const signature = JSON.stringify([r.toString(), s.toString()]);
 
+            // === 4. ОТПРАВКА ===
             const payload = {
                 market: symbol,
                 side: side,
                 type: 'MARKET',
-                size: quantity.toString(),
+                size: safeQty.toString(), // Отправляем число 9.7 (API поймет)
                 signature: signature,
                 signature_timestamp: timestampMs,
                 instruction: 'IOC'
@@ -360,19 +402,19 @@ export class ParadexService {
             const response: any = await this.requestWithRetry('POST', '/orders', payload);
             const orderId = response.id;
 
+            // === 5. POLLING ===
             let attempts = 0;
             while (attempts < 20) {
                 await new Promise(r => setTimeout(r, 500));
-
                 const orderData: any = await this.requestWithRetry('GET', `/orders/${orderId}`);
                 const status = orderData.status;
 
                 if (status === 'CLOSED') {
-                    if (orderData.cancel_reason && orderData.cancel_reason !== 'NO_ERROR') throw new Error(`Paradex Rejected: ${orderData.cancel_reason}`);
+                    if (orderData.cancel_reason && orderData.cancel_reason !== 'NO_ERROR') {
+                        throw new Error(`Paradex Rejected: ${orderData.cancel_reason}`);
+                    }
                     const avgPrice = parseFloat(orderData.avg_fill_price || '0');
-                    if (avgPrice === 0) throw new Error('Price is 0');
-
-                    console.log(`[Paradex] Filled at ${avgPrice}`);
+                    console.log(`[Paradex] Filled ${safeQty} @ ${avgPrice}`);
                     return {
                         id: orderId,
                         status: 'FILLED',
@@ -380,7 +422,6 @@ export class ParadexService {
                         executedQty: parseFloat(orderData.size || '0')
                     };
                 }
-
                 if (status === 'REJECTED' || status === 'CANCELED') {
                     throw new Error(`Paradex Rejected: ${orderData.cancel_reason}`);
                 }
@@ -389,7 +430,11 @@ export class ParadexService {
             throw new Error('Paradex Order Timeout');
 
         } catch (err: any) {
-            console.error('Paradex Trade Error:', err.message);
+            if (axios.isAxiosError(err) && err.response) {
+                console.error('🔥 Paradex API Error Detail:', JSON.stringify(err.response.data, null, 2));
+            } else {
+                console.error('Paradex Trade Error:', err.message);
+            }
             throw err;
         }
     }
