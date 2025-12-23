@@ -1,5 +1,7 @@
 import { Context, Markup } from 'telegraf';
-import { AutoTradeService, ExchangeName, TradeStatusData } from './auto_trade.service';
+import { AutoTradeService } from './auto_trade.service';
+import { ExchangeName, TradeStatusData } from './auto_trade.types'; // ИМПОРТ ТИПОВ
+import { telegramQueue } from '../../common/telegram.queue'; // C4 FIX
 
 interface AutoTradeState {
     step: 'coin' | 'long_ex' | 'short_ex' | 'total_qty' | 'step_qty' | 'bp' | 'running';
@@ -10,12 +12,10 @@ interface AutoTradeState {
     stepQty?: number;
     targetBp?: number;
 
-    // Дашборд
     statusMessageId?: number;
     lastStatusText?: string;
     lastUpdateTime?: number;
 
-    // Очередь сообщений
     messageQueue: string[];
     isProcessingQueue: boolean;
 }
@@ -30,49 +30,47 @@ const MAIN_KEYBOARD = Markup.keyboard([
 
 export class AutoTradeController {
     private userStates = new Map<number, AutoTradeState>();
+    private userStateTimestamps = new Map<number, number>();
+    private processingUsers = new Set<number>(); // C7 FIX
+    private cleanupInterval: NodeJS.Timeout;
 
-    constructor(private readonly autoTradeService: AutoTradeService) { }
+    constructor(private readonly autoTradeService: AutoTradeService) {
+        // Запускаем очистку каждую минуту (C3 FIX)
+        this.cleanupInterval = setInterval(() => this.cleanupStaleStates(), 60000);
+    }
+
+    private cleanupStaleStates() {
+        const now = Date.now();
+        const STALE_TIMEOUT = 600_000; // 10 минут
+
+        for (const [userId, timestamp] of this.userStateTimestamps.entries()) {
+            if (now - timestamp > STALE_TIMEOUT) {
+                const state = this.userStates.get(userId);
+
+                // Если пользователь не в активной торговле
+                if (state && state.step !== 'running') {
+                    console.log(`[AutoTrade] Cleaning stale state for user ${userId}`);
+                    this.userStates.delete(userId);
+                    this.userStateTimestamps.delete(userId);
+                }
+            }
+        }
+    }
 
     public isUserInFlow(userId: number): boolean {
         const state = this.userStates.get(userId);
         return !!state && state.step !== 'running';
     }
 
-    // --- ОЧЕРЕДЬ СООБЩЕНИЙ (Anti-Spam) ---
+    // --- ОЧЕРЕДЬ СООБЩЕНИЙ (C4 FIX) ---
     private enqueueMessage(userId: number, text: string, ctx: Context) {
-        const state = this.userStates.get(userId);
-        if (!state) return;
-
-        state.messageQueue.push(text);
-        if (!state.isProcessingQueue) {
-            this.processQueue(userId, ctx);
-        }
-    }
-
-    private async processQueue(userId: number, ctx: Context) {
-        const state = this.userStates.get(userId);
-        if (!state) return;
-
-        state.isProcessingQueue = true;
-
-        while (state.messageQueue.length > 0) {
-            const text = state.messageQueue.shift(); // Берем первое
-            if (text) {
-                try {
-                    await ctx.telegram.sendMessage(userId, text, { parse_mode: 'HTML' });
-                } catch (e: any) {
-                    if (e.description?.includes('Too Many Requests')) {
-                        // Если 429, возвращаем в начало очереди и ждем
-                        state.messageQueue.unshift(text);
-                        await new Promise(r => setTimeout(r, 5000));
-                    }
-                }
-                // Пауза между сообщениями (1 сек)
-                await new Promise(r => setTimeout(r, 1000));
-            }
-        }
-
-        state.isProcessingQueue = false;
+        // Используем глобальную очередь
+        telegramQueue.add(
+            async () => {
+                await ctx.telegram.sendMessage(userId, text, { parse_mode: 'HTML' });
+            },
+            1 // Приоритет: обычный
+        );
     }
 
     // --- ОБРАБОТЧИКИ ---
@@ -81,35 +79,54 @@ export class AutoTradeController {
         if (!ctx.from) return;
         const userId = ctx.from.id;
 
-        // 1. ОСТАНОВКА
-        if (this.autoTradeService.isRunning(userId)) {
-            const state = this.userStates.get(userId);
-            this.autoTradeService.stopSession(userId, 'Остановлено кнопкой OPEN POS');
+        // C7 FIX: Защита от двойного клика
+        if (this.processingUsers.has(userId)) {
+            await ctx.reply('⏳ Команда уже обрабатывается. Подождите...');
+            return;
+        }
 
-            if (state && state.statusMessageId) {
-                try {
-                    await ctx.telegram.editMessageText(userId, state.statusMessageId, undefined, '🛑 <b>Набор остановлен вручную.</b>', { parse_mode: 'HTML' });
-                } catch { }
-            } else {
-                await ctx.reply('🛑 <b>Набор остановлен вручную.</b>', { parse_mode: 'HTML', ...MAIN_KEYBOARD });
+        this.processingUsers.add(userId); // 🔒 БЛОКИРОВКА
+
+        try {
+            if (this.autoTradeService.isRunning(userId)) {
+                const state = this.userStates.get(userId);
+                this.autoTradeService.stopSession(userId, 'Остановлено кнопкой OPEN POS');
+
+                if (state && state.statusMessageId) {
+                    try {
+                        await ctx.telegram.editMessageText(userId, state.statusMessageId, undefined, '🛑 <b>Набор остановлен вручную.</b>', { parse_mode: 'HTML' });
+                    } catch { }
+                } else {
+                    await ctx.reply('🛑 <b>Набор остановлен вручную.</b>', { parse_mode: 'HTML', ...MAIN_KEYBOARD });
+                }
+                this.userStates.delete(userId);
+                this.userStateTimestamps.delete(userId); // C3 FIX
+                this.processingUsers.delete(userId); // 🔓 НЕМЕДЛЕННАЯ РАЗБЛОКИРОВКА
+                return;
             }
-            this.userStates.delete(userId);
-            return;
-        }
 
-        // 2. СТАРТ
-        if (this.isUserInFlow(userId)) {
-            this.userStates.delete(userId);
-            await ctx.reply('🚫 <b>Ввод данных отменен.</b>', { parse_mode: 'HTML', ...MAIN_KEYBOARD });
-            return;
-        }
+            if (this.isUserInFlow(userId)) {
+                this.userStates.delete(userId);
+                this.userStateTimestamps.delete(userId); // C3 FIX
+                await ctx.reply('🚫 <b>Ввод данных отменен.</b>', { parse_mode: 'HTML', ...MAIN_KEYBOARD });
+                this.processingUsers.delete(userId); // 🔓 НЕМЕДЛЕННАЯ РАЗБЛОКИРОВКА
+                return;
+            }
 
-        this.userStates.set(userId, {
-            step: 'coin',
-            messageQueue: [],
-            isProcessingQueue: false
-        });
-        await ctx.reply('\n1️⃣ Введите тикер монеты (например, ETH):', { parse_mode: 'HTML' });
+            this.userStates.set(userId, {
+                step: 'coin',
+                messageQueue: [],
+                isProcessingQueue: false
+            });
+            this.userStateTimestamps.set(userId, Date.now()); // C3 FIX
+            await ctx.reply('\n1️⃣ Введите тикер монеты (например, ETH):', { parse_mode: 'HTML' });
+
+        } finally {
+            // 🔓 РАЗБЛОКИРОВКА через 2 секунды (защита от спама)
+            setTimeout(() => {
+                this.processingUsers.delete(userId);
+            }, 2000);
+        }
     }
 
     public async handleInput(ctx: Context) {
@@ -181,7 +198,6 @@ export class AutoTradeController {
         return Markup.inlineKeyboard(buttons, { columns: 5 });
     }
 
-    // === ЗАПУСК ===
     private async startTrade(ctx: Context, userId: number) {
         const state = this.userStates.get(userId)!;
         state.step = 'running';
@@ -201,15 +217,14 @@ export class AutoTradeController {
             stepQuantity: state.stepQty!,
             targetBp: state.targetBp!,
 
-            // А. Логи (Через очередь)
             onUpdate: async (text) => {
                 this.enqueueMessage(userId, text, ctx);
             },
 
-            // Б. Живой статус
             onStatusUpdate: async (data: TradeStatusData) => {
                 const now = Date.now();
-                if (state.lastUpdateTime && now - state.lastUpdateTime < 1500) return;
+                // Защита от спама: не чаще чем раз в 2 секунды
+                if (state.lastUpdateTime && now - state.lastUpdateTime < 4000) return;
 
                 const text = this.formatDashboard(state, data);
                 if (state.statusMessageId && text !== state.lastStatusText) {
@@ -218,16 +233,10 @@ export class AutoTradeController {
                         state.lastStatusText = text;
                         state.lastUpdateTime = now;
                     } catch (e: any) {
-                        // Если сообщение удалено пользователем, создаем новое в следующий раз
                         if (e.description?.includes('not found')) {
                             state.statusMessageId = undefined;
                         }
                     }
-                }
-                // Если сообщение было удалено, создаем новое (редкий кейс)
-                else if (!state.statusMessageId) {
-                    const newMsg = await ctx.reply(text, { parse_mode: 'HTML' });
-                    state.statusMessageId = newMsg.message_id;
                 }
             },
 
@@ -238,6 +247,7 @@ export class AutoTradeController {
                     } catch { }
                 }
                 this.userStates.delete(userId);
+                this.userStateTimestamps.delete(userId); // C3 FIX
             }
         });
     }

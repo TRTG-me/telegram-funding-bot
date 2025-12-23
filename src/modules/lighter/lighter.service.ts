@@ -51,7 +51,7 @@ export class LighterService {
             privateKey: this.privateKey,
             apiKeyIndex: this.apiKeyIndex,
             accountIndex: this.accountIndex,
-            chainId: this.isTestnet ? 300 : undefined
+            chainId: this.isTestnet ? 300 : 304
         });
 
         this.tradeClient.init().catch(e => console.error('Lighter Client Init Error:', e));
