@@ -115,20 +115,10 @@ async function start() {
     );
 
     const bpService = new BpService(
-        binanceTickerService,
-        hyperliquidTickerService,
-        paradexTickerService,
-        extendedTickerService,
-        lighterTickerService,
         lighterService
     );
 
     const autoTradeService = new AutoTradeService(
-        binanceTickerService,
-        hyperliquidTickerService,
-        paradexTickerService,
-        extendedTickerService,
-        lighterTickerService,
         binanceService,
         hyperliquidService,
         paradexService,
@@ -225,6 +215,7 @@ async function start() {
                 case '🚀 Запустить тикер':
                     //return binanceTickerController.startTicker(ctx);
                     return autoCloseController.handleManualCheck(ctx);
+                // return lighterController.handleTestLimitOrder(ctx);
                 case '🛑 Остановить тикер':
                     //return binanceTickerController.stopTicker(ctx);
                     return autoCloseController.handleToggleMonitor(ctx);

@@ -14,12 +14,10 @@ export class HyperliquidTickerService {
 
     // --- ЛОГИКА ОГРАНИЧЕНИЯ ПОПЫТОК ---
     private reconnectAttempts = 0;
-    private readonly MAX_RECONNECT_ATTEMPTS = 5; // После 10 неудач подряд выключаемся
-
-    private readonly isTestnet: boolean;
+    private readonly MAX_RECONNECT_ATTEMPTS = 5; // После 10 неудач подряд выключаемся   
 
     constructor() {
-        this.isTestnet = process.env.TESTNET === 'true';
+        ;
     }
 
     public start(symbol: string, callback: PriceUpdateCallback): Promise<void> {
@@ -58,9 +56,7 @@ export class HyperliquidTickerService {
         reject?: (err: any) => void
     ) {
         // Выбираем URL в зависимости от режима
-        const wsUrl = this.isTestnet
-            ? 'wss://api.hyperliquid-testnet.xyz/ws'
-            : 'wss://api.hyperliquid.xyz/ws';
+        const wsUrl = 'wss://api.hyperliquid.xyz/ws'
 
         console.log(`Attempting to connect to Hyperliquid WebSocket (${symbol}) at ${wsUrl}...`);
 

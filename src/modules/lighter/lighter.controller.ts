@@ -9,8 +9,8 @@ export class LighterController {
         const side = 'BUY';
         const amount = 0.01;
 
-        const type: 'MARKET' | 'LIMIT' = 'MARKET';
-        const price = 10000; // Цена выше рынка -> встанет в стакан
+        const type: 'MARKET' | 'LIMIT' = 'LIMIT';
+        const price = 1000; // Цена выше рынка -> встанет в стакан
 
         try {
             await ctx.reply(`⏳ <b>Lighter Test</b>\n🚀 Отправляю <b>${type} ${side}</b>\n📦 Объем: ${amount} ${symbol} @ ${price}...`, { parse_mode: 'HTML' });

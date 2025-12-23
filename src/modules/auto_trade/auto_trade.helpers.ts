@@ -1,4 +1,4 @@
-import { ExchangeName } from './auto_trade.service';
+import { ExchangeName } from './auto_trade.types';
 import { BinanceService } from '../binance/binance.service';
 import { HyperliquidService } from '../hyperliquid/hyperliquid.service';
 import { ParadexService } from '../paradex/paradex.service';

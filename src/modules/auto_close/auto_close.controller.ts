@@ -2,8 +2,6 @@ import { Context } from 'telegraf';
 import { AutoCloseService } from './auto_close.service';
 
 export class AutoCloseController {
-    // Храним ID чата для отправки уведомлений в фоне
-    private monitoringChatId: number | null = null;
 
     constructor(private readonly riskService: AutoCloseService) { }
 
@@ -11,17 +9,16 @@ export class AutoCloseController {
      * Ручная разовая проверка (команда /check_risk или кнопка)
      */
     public async handleManualCheck(ctx: Context): Promise<void> {
+        if (!ctx.from) return;
+        const userId = ctx.from.id;
+
         await ctx.reply('🛡 <b>Запуск ручной проверки...</b>\n(Risk + ADL Check)', { parse_mode: 'HTML' });
 
         try {
-            // 1. Проверка РИСКОВ (Плечи)
-            const { logs: riskLogs } = await this.riskService.checkAndReduceRisk();
+            // Запускаем проверку через сервис (он сам разберется с сессией)
+            const { riskLogs, adlLogs } = await this.riskService.runManualCheck(userId);
 
-            // 2. Проверка ADL (Hyperliquid PnL)
-            // ВАЖНО: Убедись, что этот метод public в сервисе!
-            const { logs: adlLogs } = await this.riskService.checkAndFixHyperliquidADL();
-
-            // 3. Объединяем логи
+            // Объединяем логи
             const allLogs = [...riskLogs, ...adlLogs].filter(l => !l.includes('✅ Все биржи в безопасности'));
 
             if (allLogs.length === 0) {
@@ -37,44 +34,44 @@ export class AutoCloseController {
             await ctx.reply(`❌ <b>Ошибка проверки рисков:</b>\n${error.message}`, { parse_mode: 'HTML' });
         }
     }
+
     /**
      * Включение/Выключение мониторинга (команда /monitor или кнопка)
      */
     public async handleToggleMonitor(ctx: Context): Promise<void> {
-        if (!ctx.chat) return;
+        if (!ctx.from || !ctx.chat) return;
+        const userId = ctx.from.id;
+        const chatId = ctx.chat.id;
 
-        // 1. Проверяем статус (Нужно добавить геттер в сервис, см. ниже)
-        const isActive = this.riskService.isMonitoringActive;
+        // 1. Проверяем статус для конкретного пользователя
+        const isActive = this.riskService.isRunning(userId);
 
         if (isActive) {
             // === ЕСЛИ ВКЛЮЧЕНО -> ВЫКЛЮЧАЕМ ===
-            this.riskService.stopMonitoring();
-            this.monitoringChatId = null;
+            this.riskService.stopSession(userId);
             await ctx.reply('🛑 <b>Мониторинг остановлен.</b>', { parse_mode: 'HTML' });
 
         } else {
             // === ЕСЛИ ВЫКЛЮЧЕНО -> ВКЛЮЧАЕМ ===
-            this.monitoringChatId = ctx.chat.id;
 
-            // Эта функция будет вызываться сервисом раз в минуту (или 20 сек)
+            // Эта функция будет вызываться сервисом раз в минуту
+            // Она замыкает chatId, действительный на момент запуска
             const sendNotification = async (msg: string) => {
-                if (this.monitoringChatId) {
-                    try {
-                        // Используем telegram.sendMessage, так как ctx может протухнуть в интервале
-                        await ctx.telegram.sendMessage(this.monitoringChatId, msg, { parse_mode: 'HTML' });
-                    } catch (e) {
-                        console.error('Failed to send monitoring alert:', e);
-                        // Если бот заблокирован или чат не найден — останавливаем мониторинг
-                        this.riskService.stopMonitoring();
+                try {
+                    // Используем telegram.sendMessage напрямую по ID чата
+                    await ctx.telegram.sendMessage(chatId, msg, { parse_mode: 'HTML' });
+                } catch (e: any) {
+                    console.error(`[User ${userId}] Failed to send monitoring alert:`, e);
+                    // Если бот заблокирован или чат не найден - останавливаем этот мониторинг
+                    // (но нужно быть аккуратным, чтобы временные ошибки сети не убивали процесс)
+                    if (e.description?.includes('blocked') || e.description?.includes('not found')) {
+                        this.riskService.stopSession(userId);
                     }
                 }
             };
 
-            // Запускаем и передаем колбэк
-            this.riskService.startMonitoring(sendNotification);
-
-            // Сообщение о старте придет из самого сервиса (он сразу вызывает колбэк при старте),
-            // поэтому тут можно ничего не писать или просто подтвердить нажатие.
+            // Запускаем сессию
+            this.riskService.startSession(userId, sendNotification);
         }
     }
 }
