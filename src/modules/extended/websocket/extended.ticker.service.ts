@@ -9,7 +9,7 @@ export class ExtendedTickerService {
     // --- WATCHDOG (ЗАЩИТА ОТ ПРОТУХАНИЯ) ---
     private lastUpdateTimestamp: number = 0;
     private watchdogInterval: NodeJS.Timeout | null = null;
-    private readonly STALE_DATA_TIMEOUT = 20000; // 20 секунд тишины = реконнект
+    private readonly STALE_DATA_TIMEOUT = 30000; // 20 секунд тишины = реконнект
     private isReconnecting = false;
 
     // --- ЛОГИКА ОГРАНИЧЕНИЯ ПОПЫТОК ---

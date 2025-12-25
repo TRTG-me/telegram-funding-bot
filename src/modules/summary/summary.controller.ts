@@ -11,8 +11,10 @@ export class SummaryController {
         try {
             await ctx.reply('Собираю и форматирую данные, пожалуйста, подождите...');
 
-            // ИЗМЕНЕНИЕ: Вызываем новый метод сервиса.
-            const data: FormattedExchangeData[] = await this.summaryService.getFormattedSummaryData();
+            const userId = ctx.from?.id;
+
+            // ИЗМЕНЕНИЕ: Вызываем новый метод сервиса с userId.
+            const data: FormattedExchangeData[] = await this.summaryService.getFormattedSummaryData(userId);
 
             let messageRows = '';
 

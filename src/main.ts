@@ -25,6 +25,7 @@ import { NotificationService } from './modules/notifications/notification.servic
 import { BpService } from './modules/bp/bp.service';
 import { AutoTradeService } from './modules/auto_trade/auto_trade.service';
 import { AutoCloseService } from './modules/auto_close/auto_close.service';
+import { UserService } from './modules/users/users.service';
 
 // --- Controllers ---
 import { RankingController } from './modules/ranking/ranking.controller';
@@ -38,6 +39,7 @@ import { AutoTradeController } from './modules/auto_trade/auto_trade.controller'
 import { ExtendedTradeController } from './modules/extended/extended.trade.controller';
 import { LighterController } from './modules/lighter/lighter.controller';
 import { AutoCloseController } from './modules/auto_close/auto_close.controller';
+import { UsersController } from './modules/users/users.controller';
 
 // ============================================================
 // ГЛОБАЛЬНАЯ ЗАЩИТА (ЧТОБЫ НЕ ПАДАЛО ПРИ ОШИБКАХ СЕТИ)
@@ -81,12 +83,15 @@ async function start() {
     // 1. ИНИЦИАЛИЗАЦИЯ СЕРВИСОВ (СЛОЙ ДАННЫХ)
     // ============================================================
 
-    // Базовые сервисы бирж
-    const binanceService = new BinanceService();
-    const hyperliquidService = new HyperliquidService();
-    const paradexService = new ParadexService();
-    const lighterService = new LighterService();
-    const extendedService = new ExtendedService();
+    // Базовые сервисы бизнес-логики (БД)
+    const userService = new UserService();
+
+    // Базовые сервисы бирж (с внедрением UserService)
+    const binanceService = new BinanceService(userService);
+    const hyperliquidService = new HyperliquidService(userService);
+    const paradexService = new ParadexService(userService);
+    const lighterService = new LighterService(userService);
+    const extendedService = new ExtendedService(userService);
 
     // Веб-сокет тикеры
     const binanceTickerService = new BinanceTickerService();
@@ -148,6 +153,7 @@ async function start() {
     const extendedTradeController = new ExtendedTradeController(extendedService);
     const lighterController = new LighterController(lighterService);
     const autoCloseController = new AutoCloseController(autoCloseService);
+    const usersController = new UsersController(userService);
 
     // ============================================================
     // 3. ОБРАБОТЧИКИ TELEGRAM
@@ -179,12 +185,23 @@ async function start() {
     });
 
     // Обработка текста
-    bot.on(message('text'), (ctx) => {
+    bot.on(message('text'), async (ctx) => { // <-- ASYNC
         const userId = ctx.from?.id;
         if (!userId) return;
         const text = ctx.message.text;
 
-        // --- ЛОГИКА 1: ПРИОРИТЕТНАЯ ОБРАБОТКА МЕНЮ ---
+        if (text === '🔙 Назад' || text === '🔙 Назад в меню') {
+            return ctx.reply('Меню:', mainMenuKeyboard);
+        }
+
+        // --- USER GUARD: ЗАЩИТА ---
+        // Пропускаем /start и /admin, чтобы юзер мог добавиться или зарегистрироваться
+        if (text !== '/start' && !text.startsWith('/admin')) {
+            const hasAccess = await userService.hasAccess(userId);
+            if (!hasAccess) {
+                return ctx.reply('⛔️ <b>Ошибка доступа</b>\nВашего ID нет в базе данных.\nОбратитесь к администратору.', { parse_mode: 'HTML' });
+            }
+        }
         const mainMenuCommands = [
             'Плечи', 'Позиции', 'Фандинги',
             'Включить Alert', 'Выключить Alert', '✏️Изменить ранги',

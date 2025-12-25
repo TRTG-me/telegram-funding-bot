@@ -20,8 +20,9 @@ export class TotalPositionsController {
         try {
             await ctx.reply('🤖 Начинаю сверку позиций... Пожалуйста, подождите.');
 
+            const userId = ctx.from?.id;
             const { hedgedPairs, unhedgedPositions }: AggregatedPositions =
-                await this.totalPositionsService.getAggregatedPositions();
+                await this.totalPositionsService.getAggregatedPositions(userId);
 
 
             let message = '<pre><code>';

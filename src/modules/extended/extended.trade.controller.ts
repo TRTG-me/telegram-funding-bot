@@ -21,8 +21,9 @@ export class ExtendedTradeController {
             await ctx.reply(`🧪 <b>Extended Test</b>\nОтправляю ${type} ордер...`, { parse_mode: 'HTML' });
 
             // 1. Размещаем ордер
+            const userId = ctx.from!.id;
             const placementResult = await this.extendedService.placeOrder(
-                symbol, side, quantity, type, price
+                symbol, side, quantity, userId, type, price
             );
 
             const orderId = placementResult.orderId;

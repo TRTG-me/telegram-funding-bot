@@ -139,7 +139,8 @@ export async function executeTrade(
     coin: string,
     side: 'BUY' | 'SELL',
     qty: number,
-    services: ITradingServices
+    services: ITradingServices,
+    userId?: number
 ): Promise<{ success: boolean, price?: number, error?: string }> {
     try {
         // Получаем правильный символ для биржи
@@ -153,10 +154,10 @@ export async function executeTrade(
 
             while (placeAttempts < maxPlaceAttempts) {
                 try {
-                    res = await services.binance.placeBinOrder(symbol, side, qty);
+                    res = await services.binance.placeBinOrder(symbol, side, qty, userId);
                     if (res && res.clientOrderId) break;
                 } catch (e: any) {
-                    console.warn(`[Binance] Place order failed (Attempt ${placeAttempts + 1}/${maxPlaceAttempts}): ${e.message}`);
+                    console.warn(`[Binance] Place order failed (Attempt ${placeAttempts + 1}/${maxPlaceAttempts}): ${e.message} (User: ${userId})`);
                     if (placeAttempts === maxPlaceAttempts - 1) throw e;
                     if (e.message.includes('Insufficient') || e.message.includes('Invalid')) throw e;
                     await sleep(300);
@@ -168,22 +169,38 @@ export async function executeTrade(
                 return { success: false, error: 'No clientOrderId returned from Binance' };
             }
 
+            // --- ДОБАВЛЕНО: Пауза перед первым опросом (даем ордеру исполниться) ---
+            await sleep(300);
+
             let checkAttempts = 0;
-            while (checkAttempts < 20) {
+            const maxCheckAttempts = 20;
+
+            while (checkAttempts < maxCheckAttempts) {
                 try {
-                    const orderInfo = await services.binance.getBinOrderInfo(symbol, res.clientOrderId);
+                    const orderInfo = await services.binance.getBinOrderInfo(symbol, res.clientOrderId, userId);
                     if (orderInfo && orderInfo.status === 'FILLED') {
                         return { success: true, price: parseFloat(orderInfo.avgPrice) };
+                    }
+
+                    // Если ордер уже отменен или отклонен - выходим сразу
+                    if (orderInfo && (orderInfo.status === 'CANCELED' || orderInfo.status === 'REJECTED' || orderInfo.status === 'EXPIRED')) {
+                        return { success: false, error: `Binance order status: ${orderInfo.status}` };
                     }
                 } catch (e: any) {
                     if (!e.message?.includes('Order does not exist')) {
                         console.warn(`Binance check warning: ${e.message}`);
                     }
                 }
-                await sleep(500);
+
+                // Адаптивная задержка: 
+                // 1-3 попытки: 500мс
+                // 4-10 попытки: 1000мс
+                // 11+ попытки: 2000мс
+                const pollDelay = checkAttempts < 3 ? 500 : (checkAttempts < 10 ? 1000 : 2000);
+                await sleep(pollDelay);
                 checkAttempts++;
             }
-            return { success: false, error: 'Binance Order Timeout' };
+            return { success: false, error: 'Binance Order Confirmation Timeout' };
         }
         // ============ HYPERLIQUID ============
         else if (exchange === 'Hyperliquid') {
@@ -193,14 +210,14 @@ export async function executeTrade(
             let attempts = 0;
             while (attempts < 5) {
                 try {
-                    const res = await services.hl.placeMarketOrder(symbol, side, qty);
+                    const res = await services.hl.placeMarketOrder(symbol, side, qty, userId);
                     if (res.status === 'FILLED' || res.status === 'NEW') {
                         const avgPrice = res.avgPrice ? parseFloat(res.avgPrice) : 0;
                         return { success: true, price: avgPrice };
                     }
                     return { success: false, error: `HL Status: ${res.status}` };
                 } catch (e: any) {
-                    console.warn(`[Hyperliquid] Attempt ${attempts + 1} failed: ${e.message}`);
+                    console.warn(`[Hyperliquid] Attempt ${attempts + 1} failed: ${e.message} (User: ${userId})`);
                     if (attempts === 4) return { success: false, error: `HL Error: ${e.message}` };
                     await sleep(1000);
                 }
@@ -213,7 +230,7 @@ export async function executeTrade(
             // Helper уже возвращает с -USD-PERP, но на всякий случай
             if (!symbol.endsWith('-USD-PERP')) symbol = `${symbol}-USD-PERP`;
 
-            const res = await services.paradex.placeMarketOrder(symbol, side, qty);
+            const res = await services.paradex.placeMarketOrder(symbol, side, qty, userId);
             if (res.status === 'FILLED') {
                 return { success: true, price: res.price };
             }
@@ -222,14 +239,15 @@ export async function executeTrade(
 
         // ============ EXTENDED ============
         else if (exchange === 'Extended') {
-            const res = await services.extended.placeOrder(symbol, side, qty, 'MARKET');
+            const res = await services.extended.placeOrder(symbol, side, qty, userId, 'MARKET');
             let attempts = 0;
-            const maxAttempts = 15;
+            // Увеличили с 15 до 30 (было 4.5 сек, стало ~9 сек), так как Extended тормозит с подтверждениями
+            const maxAttempts = 30;
 
             while (attempts < maxAttempts) {
                 await sleep(300);
                 try {
-                    const rawDetails = await services.extended.getOrderDetails(res.orderId);
+                    const rawDetails = await services.extended.getOrderDetails(res.orderId, userId);
                     const details = Array.isArray(rawDetails) ? rawDetails[0] : rawDetails;
 
                     if (details) {
@@ -252,12 +270,14 @@ export async function executeTrade(
         // ============ LIGHTER ============
         else if (exchange === 'Lighter') {
             // Передаем "чистый" тикер (например 1000BONK). Сервис внутри найдет ID.
-            const res = await services.lighter.placeOrder(symbol, side, qty, 'MARKET');
+            const res = await services.lighter.placeOrder(symbol, side, qty, userId, 'MARKET');
 
             if (res.status === 'ASSUMED_FILLED' || res.avgPrice <= 0) {
+                // H2 FIX (Safe Close): Таймаут = Ошибка.
+                // Не проверяем позицию, так как при закрытии наличие позиции != успех.
                 return {
                     success: false,
-                    error: `Lighter Unverified: ${res.status}. Tx: ${res.txHash}`
+                    error: `Lighter Timeout (Assuming Failed): ${res.status}. Tx: ${res.txHash}`
                 };
             }
             console.log(res);
@@ -277,33 +297,34 @@ export async function executeTrade(
 export async function getPositionData(
     exchange: ExchangeName,
     coin: string,
-    services: ITradingServices
+    services: ITradingServices,
+    userId?: number
 ): Promise<{ size: number, price: number }> {
     try {
         if (exchange === 'Binance') {
             const targetSymbol = getUnifiedSymbol('Binance', coin);
-            const pos = await services.binance.getOpenPosition(targetSymbol);
+            const pos = await services.binance.getOpenPosition(targetSymbol, userId);
             if (pos) return { size: Math.abs(parseFloat(pos.amt)), price: parseFloat(pos.entryPrice) };
         }
         else if (exchange === 'Hyperliquid') {
             // HL positions API часто использует чистый тикер (kBONK), без -PERP
             const targetCoin = getUnifiedSymbol('Hyperliquid', coin, true);
-            const pos = await services.hl.getOpenPosition(targetCoin);
+            const pos = await services.hl.getOpenPosition(targetCoin, userId);
             if (pos) return { size: pos.size, price: pos.entryPrice || 0 };
         }
         else if (exchange === 'Paradex') {
             const targetSymbol = getUnifiedSymbol('Paradex', coin);
-            const pos = await services.paradex.getOpenPosition(targetSymbol);
+            const pos = await services.paradex.getOpenPosition(targetSymbol, userId);
             if (pos) return { size: pos.size, price: pos.entryPrice || 0 };
         }
         else if (exchange === 'Extended') {
             const targetSymbol = getUnifiedSymbol('Extended', coin);
-            const pos = await services.extended.getOpenPosition(targetSymbol);
+            const pos = await services.extended.getOpenPosition(targetSymbol, userId);
             if (pos) return { size: pos.size, price: pos.entryPrice || 0 };
         }
         else if (exchange === 'Lighter') {
             const targetSymbol = getUnifiedSymbol('Lighter', coin, true);
-            const allPositions = await services.lighter.getDetailedPositions();
+            const allPositions = await services.lighter.getDetailedPositions(userId);
             const pos = allPositions.find(p => p.coin === targetSymbol || p.coin.includes(targetSymbol));
             if (pos) return { size: pos.size, price: pos.entryPrice || 0 };
         }

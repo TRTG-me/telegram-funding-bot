@@ -171,6 +171,8 @@ export class BpController {
                 onUpdate
             );
         } catch (e: any) {
+            // H8 FIX: Останавливаем сервис при ошибке запуска
+            this.bpService.stopSession(userId);
             this.userState.delete(userId);
             if (state.messageId) {
                 try {

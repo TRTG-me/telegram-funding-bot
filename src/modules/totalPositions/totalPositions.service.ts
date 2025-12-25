@@ -40,14 +40,14 @@ export class TotalPositionsService {
         private readonly extendedService: ExtendedService,
     ) { }
 
-    public async getAggregatedPositions(): Promise<AggregatedPositions> {
-        const allPositions = await this._fetchAllPositions();
+    public async getAggregatedPositions(userId?: number): Promise<AggregatedPositions> {
+        const allPositions = await this._fetchAllPositions(userId);
         return this._findAndPairPositions(allPositions);
     }
 
-    private async _fetchAllPositions(): Promise<IDetailedPosition[]> {
+    private async _fetchAllPositions(userId?: number): Promise<IDetailedPosition[]> {
         const services = [this.binanceService, this.hyperliquidService, this.paradexService, this.lighterService, this.extendedService];
-        const results = await Promise.allSettled(services.map(service => service.getDetailedPositions()));
+        const results = await Promise.allSettled(services.map(service => service.getDetailedPositions(userId)));
 
         const allPositions: IDetailedPosition[] = [];
 
@@ -67,7 +67,7 @@ export class TotalPositionsService {
 
                 allPositions.push(...normalizedPositions);
             } else {
-                console.error(`Failed to fetch positions from ${services[index].constructor.name}:`, result.reason);
+                console.error(`Failed to fetch positions from ${services[index].constructor.name} (User: ${userId}):`, result.reason);
             }
         });
 

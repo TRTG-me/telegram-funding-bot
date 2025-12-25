@@ -9,6 +9,7 @@ import {
     IAuthRequest,
     IParadexPositionsResponse
 } from '../../common/interfaces';
+import { UserService } from '../users/users.service';
 
 // --- КОНСТАНТЫ ---
 const HTTP_TIMEOUT = 10000; // 10 секунд
@@ -20,43 +21,95 @@ const BROWSER_HEADERS = {
     'Referer': 'https://app.paradex.trade/'
 };
 
+interface ParadexContext {
+    accountAddress: string;
+    privateKey: string;
+    jwtToken: string | null;
+    tokenExpiration: number;
+}
+
 export class ParadexService {
     // --- КОНФИГУРАЦИЯ ---
     private readonly isTestnet: boolean;
     private readonly apiUrl: string;
     private readonly chainId: string;
+    private readonly TOKEN_LIFETIME_SECONDS = 300;
 
     // --- КЛЮЧИ ---
-    private readonly accountAddress: string;
-    private readonly privateKey: string;
+    private defaultContext: ParadexContext;
+    private userContexts = new Map<number, ParadexContext>();
 
-    // --- АВТОРИЗАЦИЯ ---
-    private readonly TOKEN_LIFETIME_SECONDS = 300;
-    private jwtToken: string | null = null;
-    private tokenExpiration: number = 0;
-
-    constructor() {
+    constructor(private userService?: UserService) {
         this.isTestnet = process.env.TESTNET === 'true';
 
         if (this.isTestnet) {
             console.log('🟡 [Paradex] Initializing in TESTNET mode');
             this.apiUrl = 'https://api.testnet.paradex.trade/v1';
             this.chainId = shortString.encodeShortString("PRIVATE_SN_POTC_SEPOLIA");
-
-            this.accountAddress = process.env.PARADEX_TESTNET_ACCOUNT_ADDRESS || '';
-            this.privateKey = process.env.PARADEX_TESTNET_PRIVATE_KEY || '';
         } else {
             console.log('🟢 [Paradex] Initializing in MAINNET mode');
             this.apiUrl = 'https://api.prod.paradex.trade/v1';
             this.chainId = shortString.encodeShortString("PRIVATE_SN_PARACLEAR_MAINNET");
-
-            this.accountAddress = process.env.PARADEX_ACCOUNT_ADDRESS || process.env.ACCOUNT_ADDRESS || '';
-            this.privateKey = process.env.PARADEX_ACCOUNT_PRIVATE_KEY || process.env.ACCOUNT_PRIVATE_KEY || '';
         }
 
-        if (!this.accountAddress || !this.privateKey) {
-            throw new Error(`Paradex Address/Key missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'}`);
+        // Init Default Context
+        const address = this.isTestnet ? process.env.PARADEX_TESTNET_ACCOUNT_ADDRESS : (process.env.PARADEX_ACCOUNT_ADDRESS || process.env.ACCOUNT_ADDRESS);
+        const pKey = this.isTestnet ? process.env.PARADEX_TESTNET_PRIVATE_KEY : (process.env.PARADEX_ACCOUNT_PRIVATE_KEY || process.env.ACCOUNT_PRIVATE_KEY);
+
+        this.defaultContext = {
+            accountAddress: address || '',
+            privateKey: pKey || '',
+            jwtToken: null,
+            tokenExpiration: 0
+        };
+
+        if (!this.defaultContext.accountAddress || !this.defaultContext.privateKey) {
+            // Warn only
+            console.warn(`[Paradex] Address/Key missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'}`);
         }
+    }
+
+    private createContext(address?: string, privateKey?: string): ParadexContext {
+        return {
+            accountAddress: address || '',
+            privateKey: privateKey || '',
+            jwtToken: null,
+            tokenExpiration: 0
+        };
+    }
+
+    private async getContext(userId?: number): Promise<ParadexContext> {
+        // Если userId не указан - только для системных операций
+        if (!userId) {
+            if (!this.userService) {
+                return this.defaultContext;
+            }
+            throw new Error('[Paradex] userId is required for user operations');
+        }
+
+        if (this.userContexts.has(userId)) return this.userContexts.get(userId)!;
+
+        // Проверка наличия UserService
+        if (!this.userService) {
+            throw new Error('[Paradex] UserService not available');
+        }
+
+        const user = await this.userService.getUser(userId);
+        if (!user) {
+            throw new Error(`[Paradex] User ${userId} not found in database`);
+        }
+
+        const address = this.isTestnet ? user.paradexTestAccountAddress : user.paradexAccountAddress;
+        const pKey = this.isTestnet ? user.paradexTestPrivateKey : user.paradexPrivateKey;
+
+        // Строгая проверка: ключи ОБЯЗАТЕЛЬНЫ
+        if (!address || !pKey) {
+            throw new Error(`[Paradex] User ${userId} has no API keys configured. Please add keys to database.`);
+        }
+
+        const ctx = this.createContext(address, pKey);
+        this.userContexts.set(userId, ctx);
+        return ctx;
     }
 
     private getErrorMessage(error: unknown): string {
@@ -76,7 +129,7 @@ export class ParadexService {
         try {
             const response = await axios.get(`${this.apiUrl}/system/time`, {
                 headers: BROWSER_HEADERS,
-                timeout: HTTP_TIMEOUT // <--- Timeout
+                timeout: HTTP_TIMEOUT
             });
             const serverTimeMicro = parseInt(response.data.server_time || response.data.time);
             return Math.floor(serverTimeMicro / 1000);
@@ -86,9 +139,9 @@ export class ParadexService {
         }
     }
 
-    private async getJwtToken(): Promise<string> {
-        if (this.jwtToken && this.tokenExpiration > Date.now() + 60000) {
-            return this.jwtToken;
+    private async getJwtToken(ctx: ParadexContext): Promise<string> {
+        if (ctx.jwtToken && ctx.tokenExpiration > Date.now() + 60000) {
+            return ctx.jwtToken;
         }
 
         try {
@@ -118,14 +171,14 @@ export class ParadexService {
                 message: request,
             };
 
-            const msgHash = starkTypedData.getMessageHash(typedData, this.accountAddress);
-            const { r, s } = ec.starkCurve.sign(msgHash, this.privateKey);
+            const msgHash = starkTypedData.getMessageHash(typedData, ctx.accountAddress);
+            const { r, s } = ec.starkCurve.sign(msgHash, ctx.privateKey);
             const signature = JSON.stringify([r.toString(), s.toString()]);
 
             const headers = {
                 ...BROWSER_HEADERS,
                 'Accept': 'application/json',
-                'PARADEX-STARKNET-ACCOUNT': this.accountAddress,
+                'PARADEX-STARKNET-ACCOUNT': ctx.accountAddress,
                 'PARADEX-STARKNET-SIGNATURE': signature,
                 'PARADEX-TIMESTAMP': timestamp.toString(),
                 'PARADEX-SIGNATURE-EXPIRATION': expiration.toString(),
@@ -134,27 +187,27 @@ export class ParadexService {
 
             const response = await axios.post(`${this.apiUrl}/auth?token_usage=interactive`, "", {
                 headers,
-                timeout: HTTP_TIMEOUT // <--- Timeout
+                timeout: HTTP_TIMEOUT
             });
 
             if (!response.data || !response.data.jwt_token) {
                 throw new Error('No jwt_token in response');
             }
 
-            this.jwtToken = response.data.jwt_token;
-            this.tokenExpiration = Date.now() + (this.TOKEN_LIFETIME_SECONDS * 1000);
+            ctx.jwtToken = response.data.jwt_token;
+            ctx.tokenExpiration = Date.now() + (this.TOKEN_LIFETIME_SECONDS * 1000);
 
-            return this.jwtToken as string;
+            return ctx.jwtToken as string;
 
         } catch (error) {
-            this.jwtToken = null;
-            this.tokenExpiration = 0;
+            ctx.jwtToken = null;
+            ctx.tokenExpiration = 0;
             throw new Error(`Failed to get JWT token: ${this.getErrorMessage(error)}`);
         }
     }
 
-    private async requestWithRetry<T>(method: 'GET' | 'POST', endpoint: string, data?: any): Promise<T> {
-        let token = await this.getJwtToken();
+    private async requestWithRetry<T>(method: 'GET' | 'POST', endpoint: string, ctx: ParadexContext, data?: any): Promise<T> {
+        let token = await this.getJwtToken(ctx);
 
         const makeCall = async (t: string) => {
             const config: AxiosRequestConfig = {
@@ -166,7 +219,7 @@ export class ParadexService {
                     'Authorization': `Bearer ${t}`
                 },
                 data,
-                timeout: HTTP_TIMEOUT // <--- ВАЖНО: Timeout для всех API вызовов
+                timeout: HTTP_TIMEOUT
             };
             return await axios(config);
         };
@@ -178,9 +231,9 @@ export class ParadexService {
             // Если 401, пробуем обновить токен
             if (axios.isAxiosError(error) && error.response?.status === 401) {
                 console.warn('[Paradex] 401 Unauthorized. Force refreshing token...');
-                this.jwtToken = null;
-                this.tokenExpiration = 0;
-                token = await this.getJwtToken();
+                ctx.jwtToken = null;
+                ctx.tokenExpiration = 0;
+                token = await this.getJwtToken(ctx);
                 const retryRes = await makeCall(token);
                 return retryRes.data;
             }
@@ -192,8 +245,8 @@ export class ParadexService {
     // МЕТОДЫ
     // =================================================================
 
-    private async _getOpenPositions(): Promise<IParadexPosition[]> {
-        const data = await this.requestWithRetry<IParadexPositionsResponse>('GET', '/positions');
+    private async _getOpenPositions(ctx: ParadexContext): Promise<IParadexPosition[]> {
+        const data = await this.requestWithRetry<IParadexPositionsResponse>('GET', '/positions', ctx);
         if (!Array.isArray(data?.results)) return [];
         return data.results.filter(p => p.status === 'OPEN');
     }
@@ -205,9 +258,13 @@ export class ParadexService {
         return Math.abs(Cost + unrealizedPnl - unrealizedFundingPnl);
     }
 
-    public async getDetailedPositions(): Promise<IDetailedPosition[]> {
+    public async getDetailedPositions(userId?: number): Promise<IDetailedPosition[]> {
         try {
-            const openPositions = await this._getOpenPositions();
+            const ctx = await this.getContext(userId);
+            // Если ключей нет - выходим
+            if (!ctx.accountAddress || !ctx.privateKey) return [];
+
+            const openPositions = await this._getOpenPositions(ctx);
             const detailed = await Promise.all(openPositions.map(async (pos) => {
                 if (!pos.market) return null;
                 try {
@@ -258,11 +315,15 @@ export class ParadexService {
         }
     }
 
-    public async calculateLeverage(): Promise<IExchangeData> {
+    public async calculateLeverage(userId?: number): Promise<IExchangeData> {
         try {
+            const ctx = await this.getContext(userId);
+            if (!ctx.accountAddress || !ctx.privateKey) return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
+
+
             const [accountData, openPositions] = await Promise.all([
-                this.requestWithRetry<IParadexAccountResponse>('GET', '/account'),
-                this._getOpenPositions(),
+                this.requestWithRetry<IParadexAccountResponse>('GET', '/account', ctx),
+                this._getOpenPositions(ctx),
             ]);
 
             if (typeof accountData?.account_value !== 'string') return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
@@ -289,9 +350,9 @@ export class ParadexService {
         }
     }
 
-    public async getOpenPosition(symbol: string): Promise<IDetailedPosition | undefined> {
+    public async getOpenPosition(symbol: string, userId?: number): Promise<IDetailedPosition | undefined> {
         const paradexSymbol = symbol.endsWith('-USD-PERP') ? symbol : `${symbol}-USD-PERP`;
-        const positions = await this.getDetailedPositions();
+        const positions = await this.getDetailedPositions(userId);
         return positions.find(p =>
             p.coin === symbol ||
             p.coin === paradexSymbol.replace(/-USD-PERP$/, '') ||
@@ -312,10 +373,14 @@ export class ParadexService {
     public async placeMarketOrder(
         symbol: string,
         side: 'BUY' | 'SELL',
-        quantity: number
+        quantity: number,
+        userId?: number
     ): Promise<any> {
         try {
-            console.log(`[Paradex ${this.isTestnet ? 'TEST' : 'PROD'}] Placing RPI MARKET ${side} ${quantity} ${symbol}`);
+            const ctx = await this.getContext(userId);
+            if (!ctx.accountAddress || !ctx.privateKey) throw new Error('No Paradex credentials');
+
+            console.log(`[Paradex ${this.isTestnet ? 'TEST' : 'PROD'}] Placing RPI MARKET ${side} ${quantity} ${symbol} (User: ${userId})`);
 
             // 1. Получаем шаг размера ордера
             let stepSize = 0.1;
@@ -384,8 +449,8 @@ export class ParadexService {
                 message: messageToSign
             };
 
-            const msgHash = starkTypedData.getMessageHash(typedData, this.accountAddress);
-            const { r, s } = ec.starkCurve.sign(msgHash, this.privateKey);
+            const msgHash = starkTypedData.getMessageHash(typedData, ctx.accountAddress);
+            const { r, s } = ec.starkCurve.sign(msgHash, ctx.privateKey);
             const signature = JSON.stringify([r.toString(), s.toString()]);
 
             // === 4. ОТПРАВКА ===
@@ -399,14 +464,14 @@ export class ParadexService {
                 instruction: 'IOC'
             };
 
-            const response: any = await this.requestWithRetry('POST', '/orders', payload);
+            const response: any = await this.requestWithRetry('POST', '/orders', ctx, payload);
             const orderId = response.id;
 
             // === 5. POLLING ===
             let attempts = 0;
             while (attempts < 20) {
                 await new Promise(r => setTimeout(r, 500));
-                const orderData: any = await this.requestWithRetry('GET', `/orders/${orderId}`);
+                const orderData: any = await this.requestWithRetry('GET', `/orders/${orderId}`, ctx);
                 const status = orderData.status;
 
                 if (status === 'CLOSED') {
@@ -439,10 +504,13 @@ export class ParadexService {
         }
     }
     // Быстрый метод для Auto-Close
-    public async getSimplePositions(): Promise<IDetailedPosition[]> {
+    public async getSimplePositions(userId?: number): Promise<IDetailedPosition[]> {
         try {
+            const ctx = await this.getContext(userId);
+            if (!ctx.accountAddress || !ctx.privateKey) return [];
+
             // Только 1 запрос!
-            const openPositions = await this._getOpenPositions();
+            const openPositions = await this._getOpenPositions(ctx);
 
             return openPositions.map(pos => {
                 if (!pos.market) return null;

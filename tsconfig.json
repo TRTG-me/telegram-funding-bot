@@ -8,5 +8,11 @@
     "outDir": "./dist",
     "esModuleInterop": true, // <-- И эта тоже
     "strict": true
-  }
+  },
+  "exclude": [
+    "node_modules",
+    "dist",
+    "prisma.config.ts",
+    "scripts"
+  ]
 }

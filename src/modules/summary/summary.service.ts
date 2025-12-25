@@ -50,15 +50,15 @@ export class SummaryService {
         return rank ? rank.emoji : '❓';
     }
 
-    public async getFormattedSummaryData(): Promise<FormattedExchangeData[]> {
+    public async getFormattedSummaryData(userId?: number): Promise<FormattedExchangeData[]> {
         const ranks = await this.loadRanks();
 
         const results = await Promise.allSettled([
-            this.binanceService.calculateLeverage(),
-            this.hyperliquidService.calculateLeverage(),
-            this.paradexService.calculateLeverage(),
-            this.lighterService.calculateLeverage(),
-            this.extendedService.calculateLeverage(),
+            this.binanceService.calculateLeverage(userId),
+            this.hyperliquidService.calculateLeverage(userId),
+            this.paradexService.calculateLeverage(userId),
+            this.lighterService.calculateLeverage(userId),
+            this.extendedService.calculateLeverage(userId),
         ]);
 
         const exchangeNames = ['Binance', 'HyperLiquid', 'Paradex', 'Lighter', 'Extended'];
@@ -81,7 +81,7 @@ export class SummaryService {
                     emoji
                 };
             } else {
-                console.error(`Ошибка при получении данных от ${name}:`, result.reason);
+                console.error(`Ошибка при получении данных от ${name} (User: ${userId}):`, result.reason);
                 return {
                     name,
                     leverage: 0,

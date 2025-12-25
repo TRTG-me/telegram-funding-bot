@@ -49,8 +49,20 @@ export class AutoTradeService {
         // Если сессия уже есть - останавливаем
         this.stopSession(userId, 'New Session Started');
 
+        // Перехватываем onFinished, чтобы удалить сессию из карты, когда она реально завершится
+        const originalOnFinished = config.onFinished;
+        const wrappedConfig: TradeSessionConfig = {
+            ...config,
+            onFinished: async () => {
+                if (this.sessions.get(userId) === session) {
+                    this.sessions.delete(userId);
+                }
+                if (originalOnFinished) await originalOnFinished();
+            }
+        };
+
         const session = new AutoTradeSession(
-            config,
+            wrappedConfig,
             this.tradingServices, // Передаем REST сервисы
             this.lighterService   // Передаем Data сервис
         );
@@ -60,13 +72,12 @@ export class AutoTradeService {
         try {
             await session.start();
         } catch (e) {
-            // Ошибка уже залогирована внутри
-        } finally {
-            // ✅ ВАЖНО: Удаляем сессию после завершения (успешного или с ошибкой)
+            // Ошибка уже залогирована внутри, но если старт упал сразу - чистим
             if (this.sessions.get(userId) === session) {
                 this.sessions.delete(userId);
             }
         }
+        // Убрали finally блок, так как сессия продолжает жить асинхронно
     }
 
     public stopSession(userId: number, reason: string = 'Unknown') {

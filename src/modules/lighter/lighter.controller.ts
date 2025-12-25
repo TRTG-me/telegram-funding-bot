@@ -17,10 +17,12 @@ export class LighterController {
 
             const startTime = Date.now();
 
+            const userId = ctx.from!.id;
             const result = await this.lighterService.placeOrder(
                 symbol,
                 side,
                 amount,
+                userId,
                 type,
                 price
             );

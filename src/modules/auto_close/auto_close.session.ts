@@ -12,15 +12,15 @@ const TRIGGER_LEVERAGE = 5.4;       // Красная зона (автомати
 const ALLOW_UNHEDGED_CLOSE = true;
 
 // --- КОНФИГУРАЦИЯ ADL (Hyperliquid) ---
-const ADL_TARGET_PNL_RATIO = 0.2;   // Цель (куда возвращаем PnL)
-const ADL_WARN_PNL_RATIO = 0.4;     // Желтая зона ADL (уведомление)
-const ADL_TRIGGER_PNL_RATIO = 0.5;  // Красная зона ADL (резка)
+const ADL_TARGET_PNL_RATIO = 0.5;   // Цель (куда возвращаем PnL)
+const ADL_WARN_PNL_RATIO = 0.6;     // Желтая зона ADL (уведомление)
+const ADL_TRIGGER_PNL_RATIO = 0.7;  // Красная зона ADL (резка)
 
 // --- ТАЙМЕРЫ ---
 const NORMAL_INTERVAL_MS = 30 * 1000;
 const EMERGENCY_INTERVAL_MS = 20 * 1000;
 const EMERGENCY_COOLDOWN_MS = 5 * 60 * 1000;
-const NOTIFICATION_COOLDOWN_MS = 1 * 60 * 1000; // Спамить не чаще раза в 5 мин
+const NOTIFICATION_COOLDOWN_MS = 5 * 60 * 1000; // Спамить не чаще раза в 5 мин
 
 export class AutoCloseSession {
     private readonly logger = new Logger(AutoCloseSession.name);
@@ -70,10 +70,12 @@ export class AutoCloseSession {
         this.logger.log(`[User ${this.userId}] Stopped Auto-Close monitoring.`);
     }
 
-    private async safeNotify(msg: string) {
+    private safeNotify(msg: string) {
         if (this.notifyCallback) {
-            try { await this.notifyCallback(msg); }
-            catch (e) { this.logger.error(`[User ${this.userId}] Notify failed: ${e}`); }
+            // FIRE-AND-FORGET: Не ждем ответа, чтобы не блокировать цикл мониторинга
+            this.notifyCallback(msg).catch(e => {
+                this.logger.error(`[User ${this.userId}] Notify failed (bg): ${e}`);
+            });
         }
     }
 
@@ -146,7 +148,7 @@ export class AutoCloseSession {
 
         const getLeverageData = async (name: ExchangeName) => {
             try {
-                const data = await exchangeServices[name].calculateLeverage();
+                const data = await exchangeServices[name].calculateLeverage(this.userId);
                 return { name, ...data };
             } catch (e) {
                 return { name, leverage: 0, accountEquity: 0, P_MM_keff: 0 };
@@ -225,14 +227,14 @@ export class AutoCloseSession {
         const service = allServices[exchangeName];
 
         try {
-            const positions: IDetailedPosition[] = await service.getSimplePositions();
+            const positions: IDetailedPosition[] = await service.getSimplePositions(this.userId);
 
             const otherExchanges = Object.keys(allServices).filter(k => k !== exchangeName) as ExchangeName[];
             const allHedgePositions: Record<string, IDetailedPosition[]> = {};
 
             await Promise.all(otherExchanges.map(async (exName) => {
                 try {
-                    allHedgePositions[exName] = await allServices[exName].getSimplePositions();
+                    allHedgePositions[exName] = await allServices[exName].getSimplePositions(this.userId);
                 } catch (e) { allHedgePositions[exName] = []; }
             }));
 
@@ -270,7 +272,7 @@ export class AutoCloseSession {
                         let pendingHedgeError: string | null = null;
 
                         try {
-                            const res = await Helpers.executeTrade(hedgeExName as ExchangeName, hedgePos.coin, hedgeCloseSide, qtyForThisHedge, this.services);
+                            const res = await Helpers.executeTrade(hedgeExName as ExchangeName, hedgePos.coin, hedgeCloseSide, qtyForThisHedge, this.services, this.userId);
                             if (res.success) {
                                 currentHedgeExecuted = true;
                                 pendingHedgeLog = `✅ Hedge closed on ${hedgeExName}: ${qtyForThisHedge}`;
@@ -285,7 +287,7 @@ export class AutoCloseSession {
 
                         if (currentHedgeExecuted || ALLOW_UNHEDGED_CLOSE) {
                             try {
-                                const mainRes = await Helpers.executeTrade(exchangeName, pos.coin, closeSide, qtyForThisHedge, this.services);
+                                const mainRes = await Helpers.executeTrade(exchangeName, pos.coin, closeSide, qtyForThisHedge, this.services, this.userId);
                                 if (mainRes.success) {
                                     const exCodeMain = exchangeName.charAt(0);
                                     const hedgeSymbol = currentHedgeExecuted ? hedgeExName.charAt(0) : 'NO_HEDGE';
@@ -311,7 +313,7 @@ export class AutoCloseSession {
                 if (remainingQtyToClose > 0 && ALLOW_UNHEDGED_CLOSE) {
                     if (remainingQtyToClose > 0) {
                         try {
-                            const mainRes = await Helpers.executeTrade(exchangeName, pos.coin, closeSide, remainingQtyToClose, this.services);
+                            const mainRes = await Helpers.executeTrade(exchangeName, pos.coin, closeSide, remainingQtyToClose, this.services, this.userId);
                             if (mainRes.success) {
                                 const exCodeMain = exchangeName.charAt(0);
                                 localLogs.push(`✂️ <b>${pos.coin} ${exCodeMain}-PANIC</b>: ${remainingQtyToClose} (Unhedged)`);
@@ -347,7 +349,7 @@ export class AutoCloseSession {
         let actionTaken = false;
 
         try {
-            const positions = await this.services.hl.getSimplePositions();
+            const positions = await this.services.hl.getSimplePositions(this.userId);
 
             for (const pos of positions) {
                 if (pos.unrealizedPnl === undefined || pos.unrealizedPnl <= 0) continue;
@@ -376,11 +378,11 @@ export class AutoCloseSession {
                     const closeSide = pos.side === 'L' ? 'SELL' : 'BUY';
                     const openSide = pos.side === 'L' ? 'BUY' : 'SELL';
 
-                    const closeRes = await Helpers.executeTrade('Hyperliquid', pos.coin, closeSide, cycleQty, this.services);
+                    const closeRes = await Helpers.executeTrade('Hyperliquid', pos.coin, closeSide, cycleQty, this.services, this.userId);
 
                     if (closeRes.success) {
                         await new Promise(r => setTimeout(r, 500));
-                        const openRes = await Helpers.executeTrade('Hyperliquid', pos.coin, openSide, cycleQty, this.services);
+                        const openRes = await Helpers.executeTrade('Hyperliquid', pos.coin, openSide, cycleQty, this.services, this.userId);
 
                         if (openRes.success) {
                             logs.push(`✅ <b>ADL Success ${pos.coin}:</b> Cycled ${cycleQty}.`);
@@ -429,10 +431,31 @@ export class AutoCloseSession {
         const results: T[] = [];
         const executing: Promise<void>[] = [];
 
+        // Жесткий таймаут на выполнение одной задачи
+        // ОПТИМАЛЬНО: 20 сек (7с Lighter + 0.5с sleep + API overhead)
+        const TIMEOUT_MS = 20000;
+
         for (const task of tasks) {
-            const p = task().then(result => {
-                results.push(result);
-            });
+            // Обертка с таймаутом
+            const taskWithTimeout = async () => {
+                const timeoutPromise = new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error('Task Timeout')), TIMEOUT_MS)
+                );
+                return Promise.race([task(), timeoutPromise]);
+            };
+
+            const p = taskWithTimeout()
+                .then(result => {
+                    results.push(result);
+                })
+                .catch(err => {
+                    this.logger.error(`[User ${this.userId}] Task failed/timed out: ${err.message}`);
+                    // Возвращаем ошибку в отчет, чтобы юзер видел её в ТГ
+                    // Cast to T (подразумеваем, что T это string[] или совместимо, либо просто игнорируем типы для ошибки)
+                    // Но так как T unknown, лучше просто добавить в results, если это string[]
+                    results.push([`❌ Task Failed/Timeout: ${err.message}`] as unknown as T);
+                });
+
             executing.push(p);
 
             if (executing.length >= concurrency) {

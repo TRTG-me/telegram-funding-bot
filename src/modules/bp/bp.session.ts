@@ -26,6 +26,7 @@ export class BpSession {
 
     private latestLongAsk: number | null = null;
     private latestShortBid: number | null = null;
+    private lastPriceUpdate: number = Date.now(); // H1 Fix
 
     private calculationInterval: NodeJS.Timeout | null = null;
     private isStopping = false;
@@ -49,7 +50,7 @@ export class BpSession {
     private async formatSymbolFor(exchange: ExchangeName, coin: string): Promise<string> {
         if (exchange === 'Lighter') {
             const symbol = Helpers.getUnifiedSymbol(exchange, coin, true);
-            const id = this.lighterDataService.getMarketId(symbol);
+            const id = await this.lighterDataService.getMarketId(symbol, this.userId);
             if (id !== null) return id.toString();
             throw new Error(`Market ${symbol} not found on Lighter.`);
         }
@@ -80,6 +81,7 @@ export class BpSession {
             const startSafe = async (service: TickerInstance, symbol: string, isLong: boolean) => {
                 try {
                     await service.start(symbol, (bid: string, ask: string) => {
+                        this.lastPriceUpdate = Date.now(); // H1 Fix
                         if (isLong) this.latestLongAsk = parseFloat(ask);
                         else this.latestShortBid = parseFloat(bid);
                     });
@@ -102,6 +104,16 @@ export class BpSession {
 
             this.calculationInterval = setInterval(() => {
                 if (this.isStopping) return;
+
+                // H1: Проверка на зависание вебсокета
+                if (Date.now() - this.lastPriceUpdate > 30000) {
+                    this.logger.error(`[User ${this.userId}] BP Session Timeout: No price updates for 30s.`);
+                    this.stop();
+                    // Мы не можем бросить ошибку из интервала, чтобы поймал вызывающий.
+                    // Но мы можем вызвать callback с null и остановить.
+                    callback(null);
+                    return;
+                }
 
                 if (this.latestLongAsk && this.latestShortBid && this.latestLongAsk > 0 && this.latestShortBid > 0) {
                     const bp = ((this.latestShortBid - this.latestLongAsk) / this.latestShortBid) * 10000;
