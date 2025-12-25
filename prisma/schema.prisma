@@ -1,0 +1,59 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  nickname  String?
+  telegramId BigInt  @unique // uid telegramm
+
+  // --- MAINNET KEYS ---
+  binanceApiKey           String?
+  binanceApiSecret        String?
+
+  paradexAccountAddress   String?
+  paradexPrivateKey       String?
+
+  lighterL1Address        String?
+  lighterPrivateKey       String? // LIGHTER_API_KEY_PRIVATE_KEY
+  lighterApiKeyIndex      Int?
+  lighterAccountIndex     Int?
+
+  extendedApiKey          String?
+  extendedStarkPublicKey  String?
+  extendedStarkPrivateKey String?
+  extendedVaultId         Int?
+
+  hlPrivateKey            String?
+  hlWalletAddress         String?
+  hlAccountEth            String?
+
+  // --- TESTNET KEYS ---
+  binanceApiKeyTest           String?
+  binanceApiSecretTest        String?
+
+  paradexTestAccountAddress   String?
+  paradexTestPrivateKey       String?
+
+  hlTestPrivateKey            String?
+  hlTestWalletAddress         String?
+  hlTestAccountEth            String?
+
+  extendedTestApiKey          String?
+  extendedTestStarkPublicKey  String?
+  extendedTestStarkPrivateKey String?
+  extendedTestVaultId         Int?
+
+  lighterTestL1Address        String?
+  lighterTestPrivateKey       String?
+  lighterTestApiKeyIndex      Int?
+  lighterTestAccountIndex     Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

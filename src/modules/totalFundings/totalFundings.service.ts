@@ -55,8 +55,8 @@ export class TotalFundingsService {
         }
     }
 
-    public async getHistoricalFunding(): Promise<IHistoricalFundingData> {
-        const { hedgedPairs, unhedgedPositions } = await this.totalPositionsService.getAggregatedPositions();
+    public async getHistoricalFunding(userId?: number): Promise<IHistoricalFundingData> {
+        const { hedgedPairs, unhedgedPositions } = await this.totalPositionsService.getAggregatedPositions(userId);
         const needsParadexData = hedgedPairs.some(p => p.exchanges.includes('P')) ||
             unhedgedPositions.some(p => p.exchange === 'P');
         if (needsParadexData) {

@@ -5,6 +5,7 @@ import { ParadexTickerService } from '../paradex/websocket/paradex.ticker.servic
 import { ExtendedTickerService } from '../extended/websocket/extended.ticker.service';
 import { LighterTickerService } from '../lighter/websocket/lighter.ticker.service';
 import { LighterService } from '../lighter/lighter.service';
+import { CriticalLogger } from '../../common/critical.logger'; // H7 FIX
 import * as Helpers from './auto_trade.helpers';
 import { ITradingServices } from './auto_trade.helpers'; // Импортируем интерфейс
 import { TradeSessionConfig, ExchangeName, TradeStatusData } from './auto_trade.types';
@@ -38,6 +39,10 @@ export class AutoTradeSession {
     // Health Buffer (восстановлено)
     private readonly ALLOWED_BP_SLIPPAGE = 2; // Допуск проскальзывания BP
     private bpHealthBuffer: boolean[] = [true, true, true];
+
+    // H4 FIX: Session Timeout
+    private sessionStartTime = Date.now();
+    private readonly MAX_SESSION_DURATION = 3600_000; // 1 час
 
     constructor(
         private readonly config: TradeSessionConfig,
@@ -76,12 +81,12 @@ export class AutoTradeSession {
 
             // 2. Lighter ID Lookup
             if (longExchange === 'Lighter') {
-                const id = this.lighterDataService.getMarketId(longSymbol);
+                const id = await this.lighterDataService.getMarketId(longSymbol, this.config.userId);
                 if (id === null) throw new Error(`Market ID not found for ${longSymbol} on Lighter`);
                 longSymbol = id.toString();
             }
             if (shortExchange === 'Lighter') {
-                const id = this.lighterDataService.getMarketId(shortSymbol);
+                const id = await this.lighterDataService.getMarketId(shortSymbol, this.config.userId);
                 if (id === null) throw new Error(`Market ID not found for ${shortSymbol} on Lighter`);
                 shortSymbol = id.toString();
             }
@@ -113,6 +118,14 @@ export class AutoTradeSession {
     private async runStep() {
         if (this.isStopping) return;
 
+        // H4 FIX: Проверка времени жизни сессии
+        if (Date.now() - this.sessionStartTime > this.MAX_SESSION_DURATION) {
+            await this.config.onUpdate('⏰ Таймаут сессии (1 час). Остановка.');
+            this.stop('Session timeout');
+            this.config.onFinished();
+            return;
+        }
+
         const { targetBp, stepQuantity, totalQuantity, onUpdate, onStatusUpdate } = this.config;
 
         // A. Ожидание цен (C6 FIX - защита от бесконечного цикла)
@@ -137,11 +150,11 @@ export class AutoTradeSession {
                     let shortSymbol = Helpers.getUnifiedSymbol(this.config.shortExchange, this.config.coin, this.config.shortExchange === 'Lighter');
 
                     if (this.config.longExchange === 'Lighter') {
-                        const id = this.lighterDataService.getMarketId(longSymbol);
+                        const id = await this.lighterDataService.getMarketId(longSymbol, this.config.userId);
                         if (id !== null) longSymbol = id.toString();
                     }
                     if (this.config.shortExchange === 'Lighter') {
-                        const id = this.lighterDataService.getMarketId(shortSymbol);
+                        const id = await this.lighterDataService.getMarketId(shortSymbol, this.config.userId);
                         if (id !== null) shortSymbol = id.toString();
                     }
 
@@ -218,8 +231,8 @@ export class AutoTradeSession {
 
             // E. ТРЕЙД
             const [longRes, shortRes] = await Promise.all([
-                Helpers.executeTrade(this.config.longExchange, this.config.coin, 'BUY', qtyToTrade, this.services),
-                Helpers.executeTrade(this.config.shortExchange, this.config.coin, 'SELL', qtyToTrade, this.services)
+                Helpers.executeTrade(this.config.longExchange, this.config.coin, 'BUY', qtyToTrade, this.services, this.config.userId),
+                Helpers.executeTrade(this.config.shortExchange, this.config.coin, 'SELL', qtyToTrade, this.services, this.config.userId)
             ]);
 
             // ВТОРАЯ ПРОВЕРКА (на случай остановки во время исполнения)
@@ -229,13 +242,29 @@ export class AutoTradeSession {
             }
 
             // F. ОШИБКИ (CRITICAL LEG RISK)
+            // F. ОШИБКИ (CRITICAL LEG RISK)
             if (!longRes.success && shortRes.success) {
+                // H7 FIX: Critical Logging
+                CriticalLogger.log('CRITICAL_LEG_FAILURE', {
+                    userId: this.config.userId,
+                    type: 'LONG_FAILED_SHORT_OPEN',
+                    longError: longRes.error,
+                    qty: qtyToTrade
+                });
                 throw new Error(`🛑 <b>CRITICAL:</b> SHORT открыт, LONG упал (${longRes.error})!\n⚠️ <b>ЗАКРОЙТЕ SHORT ВРУЧНУЮ!</b>`);
             }
             if (longRes.success && !shortRes.success) {
+                // H7 FIX: Critical Logging
+                CriticalLogger.log('CRITICAL_LEG_FAILURE', {
+                    userId: this.config.userId,
+                    type: 'SHORT_FAILED_LONG_OPEN',
+                    shortError: shortRes.error,
+                    qty: qtyToTrade
+                });
                 throw new Error(`🛑 <b>CRITICAL:</b> LONG открыт, SHORT упал (${shortRes.error})!\n⚠️ <b>ЗАКРОЙТЕ LONG ВРУЧНУЮ!</b>`);
             }
             if (!longRes.success && !shortRes.success) {
+                // Not critical (nothing opened), but good to log maybe? Audit didn't specify.
                 throw new Error(`Оба ордера failed. L: ${longRes.error}, S: ${shortRes.error}`);
             }
 
@@ -275,7 +304,6 @@ export class AutoTradeSession {
                 return;
             }
 
-            await onUpdate('⏳ Пауза 1.5 сек...');
             this.stepTimeout = setTimeout(() => this.runStep(), 1500);
 
         } catch (err: any) {
@@ -324,8 +352,8 @@ export class AutoTradeSession {
 
         try {
             const [longPos, shortPos] = await Promise.all([
-                Helpers.getPositionData(longExchange, coin, this.services),
-                Helpers.getPositionData(shortExchange, coin, this.services)
+                Helpers.getPositionData(longExchange, coin, this.services, this.config.userId),
+                Helpers.getPositionData(shortExchange, coin, this.services, this.config.userId)
             ]);
 
             let msg = '';

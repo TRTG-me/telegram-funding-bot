@@ -10,40 +10,49 @@ import {
 } from '@binance/derivatives-trading-usds-futures';
 
 import { IExchangeData, IDetailedPosition, IAccountInfoBin, IPositionInfoBin } from '../../common/interfaces';
+import { UserService } from '../users/users.service';
 
 export class BinanceService {
-    // Клиент может быть одного из двух типов в зависимости от режима
-    private client: DerivativesTradingPortfolioMargin | DerivativesTradingUsdsFutures;
-    private readonly isTestnet: boolean;
+    // Дефолтный клиент (из .env)
+    private defaultClient: DerivativesTradingPortfolioMargin | DerivativesTradingUsdsFutures;
+    // Кеш клиентов для юзеров
+    private clients = new Map<number, DerivativesTradingPortfolioMargin | DerivativesTradingUsdsFutures>();
 
+    private readonly isTestnet: boolean;
     private timeOffset = 0;
     private lastRttMs = 0;
 
-    constructor() {
+    constructor(private userService?: UserService) {
         // 1. Определение режима из .env
         this.isTestnet = process.env.TESTNET === 'true';
-
-        let apiKey: string;
-        let apiSecret: string;
-        let basePath: string;
-
-        // 2. Настройка ключей и URL
         if (this.isTestnet) {
             console.log('🟡 [Binance] Initializing in TESTNET mode');
-            apiKey = process.env.BINANCE_API_KEY_TEST || '';
-            apiSecret = process.env.BINANCE_API_SECRET_TEST || '';
-            basePath = DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL; // https://testnet.binancefuture.com
         } else {
             console.log('🟢 [Binance] Initializing in MAINNET mode');
-            apiKey = process.env.BINANCE_API_KEY || '';
-            apiSecret = process.env.BINANCE_API_SECRET || '';
-            // Для продакшна используем Portfolio Margin URL (как было у вас раньше)
-            basePath = DERIVATIVES_TRADING_PORTFOLIO_MARGIN_REST_API_PROD_URL;
         }
 
+        // Инициализация дефолтного клиента (для обратной совместимости)
+        this.defaultClient = this.createClient(
+            this.isTestnet ? process.env.BINANCE_API_KEY_TEST : process.env.BINANCE_API_KEY,
+            this.isTestnet ? process.env.BINANCE_API_SECRET_TEST : process.env.BINANCE_API_SECRET
+        );
+
+        // Синхронизация времени
+        this.syncTime().catch(() => { });
+        setInterval(() => this.syncTime().catch(() => { }), 60_000);
+    }
+
+    // Хелпер создания клиента
+    private createClient(apiKey?: string, apiSecret?: string): any {
         if (!apiKey || !apiSecret) {
-            throw new Error(`Binance API Key/Secret missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'}`);
+            console.warn(`[Binance] Keys missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'}. Default client might fail.`);
+            // Возвращаем заглушку или null, но лучше пусть упадет при попытке вызова, чем при старте
+            return null;
         }
+
+        const basePath = this.isTestnet
+            ? DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL
+            : DERIVATIVES_TRADING_PORTFOLIO_MARGIN_REST_API_PROD_URL;
 
         const config = {
             apiKey,
@@ -53,56 +62,92 @@ export class BinanceService {
             timeout: 30000
         };
 
-        // 3. Инициализация нужного клиента SDK
         if (this.isTestnet) {
-            // Для теста - обычные фьючерсы
-            this.client = new DerivativesTradingUsdsFutures({ configurationRestAPI: config });
+            return new DerivativesTradingUsdsFutures({ configurationRestAPI: config });
         } else {
-            // Для прода - портфельная маржа
-            this.client = new DerivativesTradingPortfolioMargin({ configurationRestAPI: config });
+            return new DerivativesTradingPortfolioMargin({ configurationRestAPI: config });
+        }
+    }
+
+    // Получение клиента для конкретного юзера (или дефолтного)
+    private async getClient(userId?: number): Promise<any> {
+        // Если юзер не указан - используем дефолтный (.env) только для системных операций
+        if (!userId) {
+            if (!this.userService) {
+                return this.defaultClient;
+            }
+            throw new Error('[Binance] userId is required for user operations');
         }
 
-        // Синхронизация времени
-        this.syncTime().catch(() => { });
-        setInterval(() => this.syncTime().catch(() => { }), 60_000);
+        // Проверяем кеш
+        if (this.clients.has(userId)) {
+            return this.clients.get(userId);
+        }
+
+        // Проверка наличия UserService
+        if (!this.userService) {
+            throw new Error('[Binance] UserService not available');
+        }
+
+        // Ищем в БД
+        const user = await this.userService.getUser(userId);
+        if (!user) {
+            throw new Error(`[Binance] User ${userId} not found in database`);
+        }
+
+        // Достаем ключи
+        const apiKey = this.isTestnet ? user.binanceApiKeyTest : user.binanceApiKey;
+        const apiSecret = this.isTestnet ? user.binanceApiSecretTest : user.binanceApiSecret;
+
+        // Строгая проверка: ключи ОБЯЗАТЕЛЬНЫ
+        if (!apiKey || !apiSecret) {
+            throw new Error(`[Binance] User ${userId} has no API keys configured. Please add keys to database.`);
+        }
+
+        // Создаем и кешируем
+        const client = this.createClient(apiKey, apiSecret);
+        if (!client) {
+            throw new Error(`[Binance] Failed to create client for user ${userId}`);
+        }
+
+        this.clients.set(userId, client);
+        return client;
     }
 
     private async syncTime() {
+        // ... (без изменений, но для краткости повторю суть)
+        // Синхронизация времени глобальна, она не зависит от API ключей, 
+        // поэтому смещение timeOffset можно использовать общее.
         const url = this.isTestnet
             ? 'https://testnet.binancefuture.com/fapi/v1/time'
             : 'https://fapi.binance.com/fapi/v1/time';
 
         let attempts = 0;
-        const maxAttempts = 10; // Пытаемся 10 раз
+        const maxAttempts = 10;
 
         while (attempts < maxAttempts) {
             try {
-                const start = Date.now(); // Замеряем время конкретного запроса
-                const r = await axios.get(url, { timeout: 5000 }); // Таймаут 5 сек, чтобы не висеть вечно
+                const start = Date.now();
+                const r = await axios.get(url, { timeout: 5000 });
                 const end = Date.now();
 
                 const serverTime = r.data.serverTime as number;
                 this.lastRttMs = end - start;
-
                 this.timeOffset = serverTime - end;
-
-                // console.log(`[Binance] Time synced. Offset: ${this.timeOffset}ms`);
-                return; // УСПЕХ: выходим из функции
+                return;
 
             } catch (e: any) {
                 attempts++;
-                console.warn(`[Binance] Time sync failed (Attempt ${attempts}/${maxAttempts}): ${e.message}`);
-
                 if (attempts === maxAttempts) {
-                    console.error('[Binance] CRITICAL: Time sync failed after all attempts. Trading might fail.');
-                    this.timeOffset = 0; // Сбрасываем в 0, надеемся на точность системных часов
+                    console.error('[Binance] CRITICAL: Time sync failed. Trading might fail.');
+                    this.timeOffset = 0;
                 } else {
-                    // Ждем 2 секунды перед следующей попыткой
                     await new Promise(r => setTimeout(r, 2000));
                 }
             }
         }
     }
+
     private nowMs() {
         return Date.now() + this.timeOffset;
     }
@@ -115,85 +160,63 @@ export class BinanceService {
     // ===== PUBLIC METHODS =====
 
     // 1) Информация об аккаунте
-    public async getAccountInfo(): Promise<IAccountInfoBin> {
+    public async getAccountInfo(userId?: number): Promise<IAccountInfoBin> {
         try {
-            const api = (this.client as any).restAPI;
+            const client = await this.getClient(userId);
+            const api = (client as any).restAPI; // Доступ к restAPI
             const ts = this.nowMs();
 
             let resp;
 
             if (this.isTestnet) {
-                // --- TESTNET (USDS Futures) ---
-                // Для тестнета используем V3, как вы просили
-                resp = await api.accountInformationV3({
-                    timestamp: ts,
-                    recvWindow: 60000,
-                });
+                resp = await api.accountInformationV3({ timestamp: ts, recvWindow: 60000 });
             } else {
-                // --- MAINNET (Portfolio Margin) ---
-                // Для основного аккаунта используем стандартный метод
-                resp = await api.accountInformation({
-                    timestamp: ts,
-                    recvWindow: 60000,
-                });
+                resp = await api.accountInformation({ timestamp: ts, recvWindow: 60000 });
             }
 
             const data = typeof resp?.data === 'function' ? await resp.data() : (resp?.data ?? resp);
-
             return data as IAccountInfoBin;
 
         } catch (err) {
-            console.error('Error fetching Binance account info:', err);
+            console.error(`Error fetching Binance account info (User: ${userId}):`, err);
             const message = this.getErrorMessage(err);
             throw new Error(`Failed to fetch account info from Binance API: ${message}`);
         }
     }
 
     // 2) Позиции
-    public async getPositionInfo(): Promise<IPositionInfoBin[]> {
+    public async getPositionInfo(userId?: number): Promise<IPositionInfoBin[]> {
         try {
+            const client = await this.getClient(userId);
+            const api = (client as any).restAPI;
             const ts = this.nowMs();
-            const api = (this.client as any).restAPI;
             let resp;
 
-
             if (this.isTestnet) {
-
-                resp = await api.positionInformationV3({
-                    timestamp: ts,
-                    recvWindow: 60000
-                });
+                resp = await api.positionInformationV3({ timestamp: ts, recvWindow: 60000 });
             } else {
-
-                resp = await api.queryUmPositionInformation({
-                    timestamp: ts,
-                    recvWindow: 60000
-                });
+                resp = await api.queryUmPositionInformation({ timestamp: ts, recvWindow: 60000 });
             }
 
-            // Обработка ответа (в разных версиях SDK data может быть функцией или свойством)
             const data = typeof resp?.data === 'function' ? await resp.data() : (resp?.data ?? resp);
-
             return (Array.isArray(data) ? data : []) as IPositionInfoBin[];
 
         } catch (err) {
-            console.error('Error fetching Binance position info:', err);
+            console.error(`Error fetching Binance position info (User: ${userId}):`, err);
             const message = this.getErrorMessage(err);
             throw new Error(`Failed to fetch position info from Binance API: ${message}`);
         }
     }
 
     // 3) Детальные позиции
-    public async getDetailedPositions(): Promise<IDetailedPosition[]> {
+    public async getDetailedPositions(userId?: number): Promise<IDetailedPosition[]> {
         try {
-            // --- ИСПРАВЛЕНИЕ ---
-            // Эндпоинт fundingInfo НЕДОСТУПЕН на Testnet. 
-            // Всегда берем метаданные об интервалах с Mainnet API.
+            // Метаданные берем, как и раньше
             const fundingUrl = 'https://fapi.binance.com/fapi/v1/fundingInfo';
 
             const [positions, fundingInfoResponse] = await Promise.all([
-                this.getPositionInfo(), // Позиции берем с текущего аккаунта (Testnet или Prod)
-                axios.get(fundingUrl, { timeout: 10000 }).catch(() => ({ data: [] })), // Если упадет, вернем пустой массив (безопасно)
+                this.getPositionInfo(userId),
+                axios.get(fundingUrl, { timeout: 10000 }).catch(() => ({ data: [] })),
             ]);
 
             const fundingIntervals = new Map<string, number>();
@@ -207,14 +230,12 @@ export class BinanceService {
 
             const positionDetailsPromises = openPositions.map(async (position): Promise<IDetailedPosition> => {
                 const symbol = position.symbol!;
-
-                // А вот цены (Premium Index) нужно брать с ТОЙ ЖЕ сети, где мы торгуем!
-                // Иначе цены будут отличаться.
+                // Premium Index - публичный метод, не зависит от ключей, 
+                // можно использовать axios напрямую
                 const premUrl = this.isTestnet
                     ? `https://testnet.binancefuture.com/fapi/v1/premiumIndex?symbol=${symbol}`
                     : `https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${symbol}`;
 
-                // Добавим try-catch для запроса цены, чтобы не ломать всё из-за одной монеты
                 let premiumIndexData: any = { lastFundingRate: '0' };
                 try {
                     const res = await axios.get(premUrl, { timeout: 5000 });
@@ -225,10 +246,8 @@ export class BinanceService {
 
                 const notional = Math.abs(parseFloat(position.notional!));
                 const numericPositionAmt = parseFloat(position.positionAmt!);
+                let fundingRate = parseFloat(premiumIndexData.lastFundingRate || '0') * 100;
 
-                let fundingRate = parseFloat(premiumIndexData.lastFundingRate || '0') * 100; // %
-
-                // Если интервал не нашли (например, в тестнете), считаем по дефолту 8 часов
                 const interval = fundingIntervals.get(symbol) || 8;
                 if (interval === 4) {
                     fundingRate *= 2;
@@ -245,31 +264,31 @@ export class BinanceService {
                 };
             });
 
-            const detailed = await Promise.all(positionDetailsPromises);
-
-            return detailed;
+            return await Promise.all(positionDetailsPromises);
         } catch (err) {
-            console.error('Error fetching or processing Binance detailed positions:', err);
+            console.error(`Error fetching Binance detailed positions (User: ${userId}):`, err);
             const message = this.getErrorMessage(err);
-            throw new Error(`Failed to get detailed positions from Binance: ${message}`);
+            throw new Error(`Failed to get detailed positions: ${message}`);
         }
     }
 
-    // 4) Создание ордера (Testnet/Prod compatible)
+    // 4) Создание ордера
     public async placeBinOrder(
         symbol: string,
         side: 'BUY' | 'SELL',
-        quantity: number
+        quantity: number,
+        userId?: number // <-- ADDED
     ): Promise<any> {
         try {
             const clientOrderId = `bot_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-            console.log(`[Binance ${this.isTestnet ? 'TEST' : 'PROD'}] Placing MARKET ${side} ${quantity} ${symbol}. ClOrdID: ${clientOrderId}`);
+            console.log(`[Binance ${this.isTestnet ? 'TEST' : 'PROD'}] Placing MARKET ${side} ${quantity} ${symbol}. ClOrdID: ${clientOrderId} (User: ${userId || 'Env'})`);
 
-            const api = (this.client as any).restAPI;
+            const client = await this.getClient(userId);
+            const api = (client as any).restAPI;
 
             const params = {
                 symbol: symbol,
-                side: side, // SDK принимает строки 'BUY'/'SELL' корректно
+                side: side,
                 type: 'MARKET',
                 quantity: quantity,
                 newClientOrderId: clientOrderId,
@@ -278,30 +297,29 @@ export class BinanceService {
             };
 
             let response;
-            // В Testnet (Futures SDK) метод называется newOrder
-            // В Prod (PM SDK) метод называется newUmOrder
             if (typeof api.newOrder === 'function') {
                 response = await api.newOrder(params);
             } else if (typeof api.newUmOrder === 'function') {
                 response = await api.newUmOrder(params);
             } else {
-                throw new Error('No supported newOrder method found in SDK client');
+                throw new Error('No supported newOrder method found');
             }
 
             const data = await response.data();
             return { ...data, clientOrderId };
 
         } catch (err) {
-            console.error('Error placing Binance order:', err);
+            console.error(`Error placing Binance order (User: ${userId}):`, err);
             const message = this.getErrorMessage(err);
             throw new Error(`Failed to place order on Binance: ${message}`);
         }
     }
 
-    // 5) Проверка статуса ордера
-    public async getBinOrderInfo(symbol: string, clientOrderId: string): Promise<any> {
+    // 5) Статус ордера
+    public async getBinOrderInfo(symbol: string, clientOrderId: string, userId?: number): Promise<any> {
         try {
-            const api = (this.client as any).restAPI;
+            const client = await this.getClient(userId);
+            const api = (client as any).restAPI;
 
             const params = {
                 symbol: symbol,
@@ -311,36 +329,39 @@ export class BinanceService {
             };
 
             let response;
-            // В Testnet - queryOrder, в Prod - queryUmOrder
             if (typeof api.queryOrder === 'function') {
                 response = await api.queryOrder(params);
             } else if (typeof api.queryUmOrder === 'function') {
                 response = await api.queryUmOrder(params);
             } else {
-                throw new Error('No supported queryOrder method found in SDK');
+                throw new Error('No supported queryOrder method found');
             }
 
             const data = typeof response?.data === 'function' ? await response.data() : (response?.data ?? response);
             return data;
-        } catch (err) {
-            console.error('Error fetching Binance order status:', err);
-            // Возвращаем null, чтобы вызывающий код знал, что проверить не удалось, но не крашился
+        } catch (err: any) {
+            if (err?.message && (
+                err.message.includes('Order does not exist') ||
+                err.message.includes('Order was not found')
+            )) {
+                return null;
+            }
+
+            console.error(`Error fetching Binance order status (User: ${userId}):`, err);
             return null;
         }
     }
-    public async getOpenPosition(symbol: string): Promise<{ amt: string, entryPrice: string } | undefined> {
-        try {
-            // 1. Получаем все позиции (используя существующий метод)
-            const positions = await this.getPositionInfo();
 
-            // 2. Ищем нужную
+    // 6) Отдельная позиция
+    public async getOpenPosition(symbol: string, userId?: number): Promise<{ amt: string, entryPrice: string } | undefined> {
+        try {
+            const positions = await this.getPositionInfo(userId);
             const pos = positions.find(p =>
                 p.symbol === symbol &&
                 p.positionAmt &&
                 parseFloat(p.positionAmt) !== 0
             );
 
-            // 3. Возвращаем в удобном формате
             if (!pos) return undefined;
 
             return {
@@ -353,68 +374,50 @@ export class BinanceService {
         }
     }
 
-    // 6) Расчёт плеча
-    public async calculateLeverage(): Promise<IExchangeData> {
+    // 7) Плечо (нужно инфо об аккаунте)
+    public async calculateLeverage(userId?: number): Promise<IExchangeData> {
         try {
             const [accountInfo, positionInfo] = await Promise.all([
-                this.getAccountInfo(),
-                this.getPositionInfo(),
+                this.getAccountInfo(userId),
+                this.getPositionInfo(userId),
             ]);
 
             const rawEquity = accountInfo.accountEquity || accountInfo.totalMarginBalance;
-
             const rawMaintMargin = accountInfo.accountMaintMargin || accountInfo.totalMaintMargin;
 
             if (!rawEquity || !rawMaintMargin) {
-                console.error('[Binance Debug] Account Data:', accountInfo); // Покажет, что реально пришло
-                throw new Error('Incomplete account data: Equity or MaintMargin is missing.');
+                // Если данные не пришли - варнинг и выход
+                // console.warn('[Binance] Incomplete data for leverage calc');
+                throw new Error('Incomplete account data');
             }
 
             const accountEquity = parseFloat(rawEquity);
             const accountMaintMargin = parseFloat(rawMaintMargin);
 
-            if (isNaN(accountEquity) || isNaN(accountMaintMargin)) {
-                throw new Error('Failed to parse financial data from API response.');
-            }
-
-            // 3. Считаем Notional (Сумма открытых позиций)
             const totalNotional = positionInfo.reduce((sum, position) => {
                 return sum + Math.abs(parseFloat(position.notional || '0'));
             }, 0);
             const P_MM_keff = totalNotional ? (accountMaintMargin / totalNotional) : 0;
-            // 4. Считаем плечо
-            // Формула: Notional / (Equity - MaintMargin)
-            // (Equity - MaintMargin) — это свободная маржа, доступная для потерь до ликвидации (примерно)
-            // Иногда считают просто Notional / Equity, но ваш вариант консервативнее.
-            const denominator = accountEquity - accountMaintMargin;
 
+            const denominator = accountEquity - accountMaintMargin;
             if (denominator <= 0) {
-                // Если маржа меньше поддерживающей, это почти ликвидация или ошибка данных
-                if (totalNotional !== 0) {
-                    // Возвращаем высокое плечо или ошибку
-                    return { leverage: 999, accountEquity, P_MM_keff };
-                }
+                if (totalNotional !== 0) return { leverage: 999, accountEquity, P_MM_keff };
                 return { leverage: 0, accountEquity, P_MM_keff };
             }
 
             const leverage = totalNotional / denominator;
-
-            if (!isFinite(leverage)) {
-                throw new Error('Calculated leverage resulted in an infinite number.');
-            }
-
             return { leverage, accountEquity, P_MM_keff };
 
         } catch (err) {
-            console.error('Error during leverage calculation:', err);
+            console.error(`Error during leverage calculation (User: ${userId}):`, err);
             const message = this.getErrorMessage(err);
             throw new Error(`Failed to calculate account leverage: ${message}`);
         }
     }
 
-    // 7) Публичные данные (Цена)
+    // 8) Цены (публичные)
     public async getExchangeData(symbol: string): Promise<IExchangeData> {
-        // Динамический URL для тикера
+        // ... старый код (он публичный, userId не нужен)
         const baseUrl = this.isTestnet
             ? 'https://testnet.binancefuture.com'
             : 'https://fapi.binance.com';
@@ -429,24 +432,24 @@ export class BinanceService {
             throw e;
         }
     }
-    // Быстрый метод для Auto-Close (без фандинга и цен)
-    public async getSimplePositions(): Promise<IDetailedPosition[]> {
+
+    // 9) Простые позиции для Auto-Close
+    public async getSimplePositions(userId?: number): Promise<IDetailedPosition[]> {
         try {
-            // Только 1 запрос!
-            const positions = await this.getPositionInfo();
+            const positions = await this.getPositionInfo(userId);
 
             return positions
                 .filter(p => p.positionAmt && parseFloat(p.positionAmt) !== 0)
                 .map(p => {
                     const amt = parseFloat(p.positionAmt!);
                     return {
-                        coin: p.symbol!.replace(/USDT|USDC$/, ''), // Упрощенная нормализация
-                        notional: '0', // Не тратим время на расчет
+                        coin: p.symbol!.replace(/USDT|USDC$/, ''),
+                        notional: '0',
                         size: Math.abs(amt),
                         side: amt > 0 ? 'L' : 'S',
                         exchange: 'B',
-                        fundingRate: 0, // Не нужно
-                        entryPrice: 0   // Не нужно
+                        fundingRate: 0,
+                        entryPrice: 0
                     };
                 });
         } catch (err) {
@@ -455,5 +458,6 @@ export class BinanceService {
         }
     }
 }
+
 
 export default BinanceService;

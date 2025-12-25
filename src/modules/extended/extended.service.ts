@@ -10,6 +10,7 @@ import {
     IExtendedMarketStatsResponse,
     IExtendedPositionsResponse
 } from '../../common/interfaces';
+import { UserService } from '../users/users.service';
 
 // Настройки
 const CONFIG = {
@@ -18,16 +19,21 @@ const CONFIG = {
     HTTP_TIMEOUT: 10000 // <--- НОВОЕ: 10 секунд на запрос
 };
 
+interface ExtendedContext {
+    apiKey: string;
+    privateKey: string;
+    publicKey: string;
+    vaultId: string;
+}
+
 export class ExtendedService {
     private readonly isTestnet: boolean;
     private readonly apiUrl: string;
 
-    private readonly apiKey: string;
-    private readonly privateKey: string;
-    private readonly publicKey: string;
-    private readonly vaultId: string;
+    private defaultContext: ExtendedContext;
+    private userContexts = new Map<number, ExtendedContext>();
 
-    constructor() {
+    constructor(private userService?: UserService) {
         this.isTestnet = process.env.TESTNET === 'true';
 
         this.apiUrl = this.isTestnet
@@ -40,21 +46,65 @@ export class ExtendedService {
             console.log('🟢 [Extended] Initializing in MAINNET mode');
         }
 
+        let apiKey: string, privateKey: string, publicKey: string, vaultId: string;
+
         if (this.isTestnet) {
-            this.apiKey = process.env.EXTENDED_API_KEY_TEST || '';
-            this.privateKey = process.env.EXTENDED_STARK_KEY_PRIVATE_TEST || '';
-            this.publicKey = process.env.EXTENDED_STARK_KEY_PUBLIC_TEST || '';
-            this.vaultId = process.env.EXTENDED_VAULTID_TEST || '';
+            apiKey = process.env.EXTENDED_API_KEY_TEST || '';
+            privateKey = process.env.EXTENDED_STARK_KEY_PRIVATE_TEST || '';
+            publicKey = process.env.EXTENDED_STARK_KEY_PUBLIC_TEST || '';
+            vaultId = process.env.EXTENDED_VAULTID_TEST || '';
         } else {
-            this.apiKey = process.env.EXTENDED_API_KEY || '';
-            this.privateKey = process.env.EXTENDED_STARK_KEY_PRIVATE || '';
-            this.publicKey = process.env.EXTENDED_STARK_KEY_PUBLIC || '';
-            this.vaultId = process.env.EXTENDED_VAULTID || '';
+            apiKey = process.env.EXTENDED_API_KEY || '';
+            privateKey = process.env.EXTENDED_STARK_KEY_PRIVATE || '';
+            publicKey = process.env.EXTENDED_STARK_KEY_PUBLIC || '';
+            vaultId = process.env.EXTENDED_VAULTID || '';
         }
 
-        if (!this.apiKey) {
-            throw new Error(`Extended API Key is missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'}`);
+        this.defaultContext = { apiKey, privateKey, publicKey, vaultId };
+
+        if (!this.defaultContext.apiKey) {
+            console.warn(`[Extended] API Key is missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'}`);
         }
+    }
+
+    private createContext(apiKey: string, privateKey: string, publicKey: string, vaultId: string): ExtendedContext {
+        return { apiKey, privateKey, publicKey, vaultId };
+    }
+
+    private async getContext(userId?: number): Promise<ExtendedContext> {
+        // Если userId не указан - только для системных операций
+        if (!userId) {
+            if (!this.userService) {
+                return this.defaultContext;
+            }
+            throw new Error('[Extended] userId is required for user operations');
+        }
+
+        if (this.userContexts.has(userId)) return this.userContexts.get(userId)!;
+
+        // Проверка наличия UserService
+        if (!this.userService) {
+            throw new Error('[Extended] UserService not available');
+        }
+
+        const user = await this.userService.getUser(userId);
+        if (!user) {
+            throw new Error(`[Extended] User ${userId} not found in database`);
+        }
+
+        const apiKey = this.isTestnet ? user.extendedTestApiKey : user.extendedApiKey;
+        const privateKey = this.isTestnet ? user.extendedTestStarkPrivateKey : user.extendedStarkPrivateKey;
+        const publicKey = this.isTestnet ? user.extendedTestStarkPublicKey : user.extendedStarkPublicKey;
+        const vaultId = this.isTestnet ? user.extendedTestVaultId : user.extendedVaultId;
+
+        // Строгая проверка: ключи ОБЯЗАТЕЛЬНЫ
+        if (!apiKey || !privateKey || !publicKey || !vaultId) {
+            throw new Error(`[Extended] User ${userId} has no API keys configured. Please add keys to database.`);
+        }
+
+        const ctx = this.createContext(apiKey, privateKey, publicKey, vaultId.toString());
+        this.userContexts.set(userId, ctx);
+        return ctx;
     }
 
     private getErrorMessage(error: unknown): string {
@@ -71,11 +121,13 @@ export class ExtendedService {
     // --- 1. DATA FETCHING METHODS ---
     // =========================================================================
 
-    private async getAccountBalance(): Promise<IExtendedApiResponse> {
+    private async getAccountBalance(ctx: ExtendedContext): Promise<IExtendedApiResponse> {
         try {
+            if (!ctx.apiKey) return {} as IExtendedApiResponse;
+
             const response = await axios.get(`${this.apiUrl}/user/balance`, {
-                headers: { 'X-Api-Key': this.apiKey, 'Content-Type': 'application/json' },
-                timeout: CONFIG.HTTP_TIMEOUT // <--- Added Timeout
+                headers: { 'X-Api-Key': ctx.apiKey, 'Content-Type': 'application/json' },
+                timeout: CONFIG.HTTP_TIMEOUT
             });
             return response.data;
         } catch (error) {
@@ -83,11 +135,13 @@ export class ExtendedService {
         }
     }
 
-    private async getUserPositions(): Promise<IExtendedPositionsResponse> {
+    private async getUserPositions(ctx: ExtendedContext): Promise<IExtendedPositionsResponse> {
         try {
+            if (!ctx.apiKey) return {} as IExtendedPositionsResponse;
+
             const response = await axios.get(`${this.apiUrl}/user/positions`, {
-                headers: { 'X-Api-Key': this.apiKey, 'Content-Type': 'application/json' },
-                timeout: CONFIG.HTTP_TIMEOUT // <--- Added Timeout
+                headers: { 'X-Api-Key': ctx.apiKey, 'Content-Type': 'application/json' },
+                timeout: CONFIG.HTTP_TIMEOUT
             },);
             return response.data;
         } catch (error) {
@@ -95,9 +149,12 @@ export class ExtendedService {
         }
     }
 
-    public async getDetailedPositions(): Promise<IDetailedPosition[]> {
+    public async getDetailedPositions(userId?: number): Promise<IDetailedPosition[]> {
         try {
-            const positionsResponse = await this.getUserPositions();
+            const ctx = await this.getContext(userId);
+            if (!ctx.apiKey) return [];
+
+            const positionsResponse = await this.getUserPositions(ctx);
             if (positionsResponse.status !== 'OK' || !Array.isArray(positionsResponse.data)) {
                 if (positionsResponse.status === 'OK') return [];
                 throw new Error('Invalid positions data');
@@ -108,39 +165,53 @@ export class ExtendedService {
             const detailedPositionsPromises = openPositions.map(async (position): Promise<IDetailedPosition> => {
                 const market = position.market;
                 // <--- Added Timeout here inside the loop
-                const statsResponse = await axios.get<IExtendedMarketStatsResponse>(
-                    `${this.apiUrl}/info/markets/${market}/stats`,
-                    { timeout: CONFIG.HTTP_TIMEOUT }
-                );
-                const fundingRateData = statsResponse.data?.data?.fundingRate || '0';
-                const fundingRate = parseFloat(fundingRateData) * 8 * 100;
+                try {
+                    const statsResponse = await axios.get<IExtendedMarketStatsResponse>(
+                        `${this.apiUrl}/info/markets/${market}/stats`,
+                        { timeout: CONFIG.HTTP_TIMEOUT }
+                    );
+                    const fundingRateData = statsResponse.data?.data?.fundingRate || '0';
+                    const fundingRate = parseFloat(fundingRateData) * 8 * 100;
 
-                return {
-                    coin: market.replace(/-USD$/, ''),
-                    notional: position.value,
-                    size: Math.abs(parseFloat(position.size)),
-                    side: position.side === 'LONG' ? 'L' : 'S',
-                    exchange: 'E',
-                    fundingRate: fundingRate,
-                    entryPrice: parseFloat(position.openPrice || '0')
-                };
+                    return {
+                        coin: market.replace(/-USD$/, ''),
+                        notional: position.value,
+                        size: Math.abs(parseFloat(position.size)),
+                        side: position.side === 'LONG' ? 'L' : 'S',
+                        exchange: 'E',
+                        fundingRate: fundingRate,
+                        entryPrice: parseFloat(position.openPrice || '0')
+                    };
+                } catch (e) {
+                    return {
+                        coin: market.replace(/-USD$/, ''),
+                        notional: position.value,
+                        size: Math.abs(parseFloat(position.size)),
+                        side: position.side === 'LONG' ? 'L' : 'S',
+                        exchange: 'E',
+                        fundingRate: 0,
+                        entryPrice: parseFloat(position.openPrice || '0')
+                    };
+                }
             });
             return Promise.all(detailedPositionsPromises);
         } catch (err) {
-            console.error('Error fetching Extended positions:', err);
+            if (userId) console.error('Error fetching Extended positions:', err);
             return [];
         }
     }
 
-    public async getOpenPosition(symbol: string): Promise<IDetailedPosition | undefined> {
+    public async getOpenPosition(symbol: string, userId?: number): Promise<IDetailedPosition | undefined> {
         const cleanSymbol = symbol.replace('-USD', '');
-        const allPositions = await this.getDetailedPositions();
+        const allPositions = await this.getDetailedPositions(userId);
         return allPositions.find(p => p.coin === cleanSymbol);
     }
 
-    public async calculateLeverage(): Promise<IExchangeData> {
+    public async calculateLeverage(userId?: number): Promise<IExchangeData> {
         try {
-            const response = await this.getAccountBalance();
+            const ctx = await this.getContext(userId);
+
+            const response = await this.getAccountBalance(ctx);
             const data = response?.data;
             if (!data) return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
 
@@ -170,23 +241,26 @@ export class ExtendedService {
         symbol: string,
         side: 'BUY' | 'SELL',
         qty: number,
+        userId?: number,
         type: 'LIMIT' | 'MARKET' = 'LIMIT',
         price?: number,
         slippage: number = CONFIG.DEFAULT_SLIPPAGE
     ): Promise<{ orderId: string, sentPrice: string, type: string }> {
 
-        if (!this.privateKey || !this.publicKey || !this.vaultId) {
+        const ctx = await this.getContext(userId);
+
+        if (!ctx.privateKey || !ctx.publicKey || !ctx.vaultId) {
             throw new Error('Extended keys not configured');
         }
 
         if (!symbol.includes('-USD')) symbol = `${symbol}-USD`;
 
-        console.log(`\n🚀 ${type} ${side} ${symbol} | Qty: ${qty} ${type === 'LIMIT' ? '| Price: ' + price : ''}`);
+        console.log(`\n🚀 ${type} ${side} ${symbol} | Qty: ${qty} ${type === 'LIMIT' ? '| Price: ' + price : ''} (User: ${userId})`);
 
         // <--- ВАЖНО: Добавлен timeout в инстанс. Это защитит все 5 запросов внутри этого метода.
         const api = axios.create({
             baseURL: this.apiUrl,
-            headers: { 'X-Api-Key': this.apiKey, 'Content-Type': 'application/json' },
+            headers: { 'X-Api-Key': ctx.apiKey, 'Content-Type': 'application/json' },
             timeout: CONFIG.HTTP_TIMEOUT
         });
 
@@ -247,7 +321,7 @@ export class ExtendedService {
             };
 
             // 4. Подпись
-            const settlement = this.signOrder(orderPayload, marketData, starknetData);
+            const settlement = this.signOrder(orderPayload, marketData, starknetData, ctx);
 
             // 5. Отправка
             const response = await api.post('/user/order', { ...orderPayload, settlement });
@@ -274,11 +348,14 @@ export class ExtendedService {
         }
     }
 
-    public async getOrderDetails(externalId: string): Promise<any> {
+    public async getOrderDetails(externalId: string, userId?: number): Promise<any> {
         try {
+            const ctx = await this.getContext(userId);
+            if (!ctx.apiKey) throw new Error('No Key');
+
             const response = await axios.get(`${this.apiUrl}/user/orders/external/${externalId}`, {
                 headers: {
-                    'X-Api-Key': this.apiKey,
+                    'X-Api-Key': ctx.apiKey,
                     'Content-Type': 'application/json',
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 },
@@ -301,7 +378,7 @@ export class ExtendedService {
     // --- 3. HELPERS ---
     // =========================================================================
 
-    private signOrder(order: any, marketInfo: any, network: any) {
+    private signOrder(order: any, marketInfo: any, network: any, ctx: ExtendedContext) {
         const isBuy = order.side === 'BUY';
         const amount = parseFloat(order.qty);
         const price = parseFloat(order.price);
@@ -330,7 +407,7 @@ export class ExtendedService {
 
         const orderHash = poseidonHashMany([
             BigInt('0x36da8d51815527cabfaa9c982f564c80fa7429616739306036f1f9b608dd112'),
-            BigInt(this.vaultId),
+            BigInt(ctx.vaultId),
             BigInt(marketInfo.l2Config.syntheticId),
             baseAmount,
             BigInt(marketInfo.l2Config.collateralId),
@@ -344,16 +421,16 @@ export class ExtendedService {
         const msgHash = poseidonHashMany([
             BigInt(shortString.encodeShortString("StarkNet Message")),
             domainHash,
-            BigInt(this.publicKey),
+            BigInt(ctx.publicKey),
             orderHash
         ]);
 
-        const signature = ec.starkCurve.sign(num.toHex(msgHash), this.privateKey);
+        const signature = ec.starkCurve.sign(num.toHex(msgHash), ctx.privateKey);
 
         return {
             signature: { r: num.toHex(signature.r), s: num.toHex(signature.s) },
-            starkKey: this.publicKey,
-            collateralPosition: this.vaultId
+            starkKey: ctx.publicKey,
+            collateralPosition: ctx.vaultId
         };
     }
 
@@ -375,9 +452,12 @@ export class ExtendedService {
         return rounded.toFixed(precision);
     }
     // Быстрый метод для Auto-Close
-    public async getSimplePositions(): Promise<IDetailedPosition[]> {
+    public async getSimplePositions(userId?: number): Promise<IDetailedPosition[]> {
         try {
-            const positionsResponse = await this.getUserPositions();
+            const ctx = await this.getContext(userId);
+            if (!ctx.apiKey) return [];
+
+            const positionsResponse = await this.getUserPositions(ctx);
             if (positionsResponse.status !== 'OK' || !Array.isArray(positionsResponse.data)) {
                 return [];
             }

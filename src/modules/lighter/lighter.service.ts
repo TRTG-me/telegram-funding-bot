@@ -2,71 +2,139 @@ import axios from 'axios';
 import { Injectable } from '@nestjs/common';
 import { LighterClient, ORDER_TYPE } from './lighter.client';
 import { IExchangeData, IDetailedPosition, ILighterApiResponse, IFundingRatesResponseLighter } from '../../common/interfaces';
+import { UserService } from '../users/users.service';
 
 // Константа таймаута
 const HTTP_TIMEOUT = 10000;
+
+interface LighterContext {
+    client: LighterClient;
+    l1Address: string;
+}
 
 @Injectable()
 export class LighterService {
     private readonly isTestnet: boolean;
     private readonly API_URL: string;
-    private readonly l1Address: string;
 
-    private readonly privateKey: string;
-    private readonly apiKeyIndex: number;
-    private readonly accountIndex: string | number;
+    private defaultContext: LighterContext;
+    private userContexts = new Map<number, LighterContext>();
 
-    private tradeClient: LighterClient;
-
-    constructor() {
+    constructor(private userService?: UserService) {
         this.isTestnet = process.env.TESTNET === 'true';
+
+        let l1Address: string;
+        let privateKey: string;
+        let apiKeyIndex: number;
+        let accountIndex: string | number;
 
         if (this.isTestnet) {
             console.log('🟡 [Lighter] Initializing in TESTNET mode');
             this.API_URL = 'https://testnet.zklighter.elliot.ai/api/v1';
 
-            this.l1Address = process.env.LIGHTER_L1_ADDRESS_TEST || '';
-            this.privateKey = process.env.LIGHTER_API_KEY_PRIVATE_KEY_TEST || '';
-            this.apiKeyIndex = Number(process.env.LIGHTER_API_KEY_INDEX_TEST || 0);
-            this.accountIndex = process.env.LIGHTER_ACCOUNT_INDEX_TEST || 0;
+            l1Address = process.env.LIGHTER_L1_ADDRESS_TEST || '';
+            privateKey = process.env.LIGHTER_API_KEY_PRIVATE_KEY_TEST || '';
+            apiKeyIndex = Number(process.env.LIGHTER_API_KEY_INDEX_TEST || 0);
+            accountIndex = process.env.LIGHTER_ACCOUNT_INDEX_TEST || 0;
         } else {
             console.log('🟢 [Lighter] Initializing in MAINNET mode');
             this.API_URL = 'https://mainnet.zklighter.elliot.ai/api/v1';
 
-            this.l1Address = process.env.LIGHTER_L1_ADDRESS || '';
-            this.privateKey = process.env.LIGHTER_API_KEY_PRIVATE_KEY || '';
-            this.apiKeyIndex = Number(process.env.LIGHTER_API_KEY_INDEX || 0);
-            this.accountIndex = process.env.LIGHTER_ACCOUNT_INDEX || 0;
+            l1Address = process.env.LIGHTER_L1_ADDRESS || '';
+            privateKey = process.env.LIGHTER_API_KEY_PRIVATE_KEY || '';
+            apiKeyIndex = Number(process.env.LIGHTER_API_KEY_INDEX || 0);
+            accountIndex = process.env.LIGHTER_ACCOUNT_INDEX || 0;
         }
 
-        if (!this.l1Address) {
-            throw new Error(`Lighter L1 Address is missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'} mode.`);
-        }
-        if (!this.privateKey) {
-            console.warn(`⚠️ [Lighter] Private Key missing. Trading functions will not work.`);
+        // Init Default Context
+        this.defaultContext = this.createContext(l1Address, privateKey, apiKeyIndex, accountIndex);
+
+        if (!this.defaultContext.l1Address) {
+            console.warn(`[Lighter] L1 Address missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'} mode.`);
         }
 
-        this.tradeClient = new LighterClient({
-            baseUrl: this.API_URL.replace('/api/v1', ''),
-            privateKey: this.privateKey,
-            apiKeyIndex: this.apiKeyIndex,
-            accountIndex: this.accountIndex,
-            chainId: this.isTestnet ? 300 : 304
-        });
-
-        this.tradeClient.init().catch(e => console.error('Lighter Client Init Error:', e));
+        // Init default client
+        if (this.defaultContext.client) {
+            this.defaultContext.client.init().catch(e => console.error('Lighter Default Client Init Error:', e));
+        }
     }
 
-    public async checkSymbolExists(coin: string): Promise<boolean> {
-        if (!this.tradeClient.isInitialized) {
-            await this.tradeClient.init();
+    private createContext(l1Address: string, privateKey: string, apiKeyIndex: number = 0, accountIndex: string | number = 0): LighterContext {
+        let client: LighterClient = null as any; // Allow null initially if credentials missing
+
+        if (l1Address && privateKey) {
+            client = new LighterClient({
+                baseUrl: this.API_URL.replace('/api/v1', ''),
+                privateKey: privateKey,
+                apiKeyIndex: apiKeyIndex,
+                accountIndex: accountIndex,
+                chainId: this.isTestnet ? 300 : 304
+            });
         }
-        const marketId = this.tradeClient.getMarketId(coin);
+
+        return {
+            client,
+            l1Address
+        };
+    }
+
+    private async getContext(userId?: number): Promise<LighterContext> {
+        // Если userId не указан - только для системных операций
+        if (!userId) {
+            if (!this.userService) {
+                return this.defaultContext;
+            }
+            throw new Error('[Lighter] userId is required for user operations');
+        }
+
+        if (this.userContexts.has(userId)) return this.userContexts.get(userId)!;
+
+        // Проверка наличия UserService
+        if (!this.userService) {
+            throw new Error('[Lighter] UserService not available');
+        }
+
+        const user = await this.userService.getUser(userId);
+        if (!user) {
+            throw new Error(`[Lighter] User ${userId} not found in database`);
+        }
+
+        const l1Address = this.isTestnet ? user.lighterTestL1Address : user.lighterL1Address;
+        const privateKey = this.isTestnet ? user.lighterTestPrivateKey : user.lighterPrivateKey;
+
+        // Строгая проверка: ключи ОБЯЗАТЕЛЬНЫ
+        if (!l1Address || !privateKey) {
+            throw new Error(`[Lighter] User ${userId} has no API keys configured. Please add keys to database.`);
+        }
+
+        const apiKeyIndex = this.isTestnet ? (user.lighterTestApiKeyIndex ?? 0) : (user.lighterApiKeyIndex ?? 0);
+        const accountIndex = this.isTestnet ? (user.lighterTestAccountIndex ?? 0) : (user.lighterAccountIndex ?? 0);
+
+        const ctx = this.createContext(l1Address, privateKey, apiKeyIndex, accountIndex);
+
+        if (ctx.client) {
+            ctx.client.init().catch(e => console.error(`Lighter Client Init Error for user ${userId}:`, e));
+        }
+
+        this.userContexts.set(userId, ctx);
+        return ctx;
+    }
+
+    public async checkSymbolExists(coin: string, userId?: number): Promise<boolean> {
+        const ctx = await this.getContext(userId);
+        if (!ctx.client) return false;
+
+        if (!ctx.client.isInitialized) {
+            await ctx.client.init();
+        }
+        const marketId = ctx.client.getMarketId(coin);
         return marketId !== null;
     }
 
-    public getMarketId(symbol: string): number | null {
-        return this.tradeClient.getMarketId(symbol);
+    public async getMarketId(symbol: string, userId?: number): Promise<number | null> {
+        const ctx = await this.getContext(userId);
+        if (!ctx.client) return null;
+        return ctx.client.getMarketId(symbol);
     }
 
     private getErrorMessage(error: unknown): string {
@@ -82,9 +150,11 @@ export class LighterService {
 
     // --- Data Methods with Timeouts ---
 
-    private async getAccountData(): Promise<ILighterApiResponse> {
+    private async getAccountData(ctx: LighterContext): Promise<ILighterApiResponse> {
         try {
-            const url = `${this.API_URL}/account?by=l1_address&value=${this.l1Address}`;
+            if (!ctx.l1Address) return {} as ILighterApiResponse;
+
+            const url = `${this.API_URL}/account?by=l1_address&value=${ctx.l1Address}`;
             // Добавил таймаут
             const response = await axios.get<ILighterApiResponse>(url, {
                 headers: { 'accept': 'application/json' },
@@ -96,11 +166,14 @@ export class LighterService {
         }
     }
 
-    public async getDetailedPositions(): Promise<IDetailedPosition[]> {
+    public async getDetailedPositions(userId?: number): Promise<IDetailedPosition[]> {
         try {
+            const ctx = await this.getContext(userId);
+            if (!ctx.l1Address) return [];
+
             // Добавил таймаут в запрос фандинга
             const [accountResponse, fundingResponse] = await Promise.all([
-                this.getAccountData(),
+                this.getAccountData(ctx),
                 axios.get<IFundingRatesResponseLighter>(`${this.API_URL}/funding-rates`, { timeout: HTTP_TIMEOUT })
             ]);
 
@@ -142,19 +215,23 @@ export class LighterService {
 
         } catch (err) {
             const message = this.getErrorMessage(err);
-            console.error('Error fetching Lighter detailed positions:', err);
+            // Don't spam cache errors for inactive users
+            if (userId) console.error(`Error fetching Lighter detailed positions (User ${userId}):`, err);
             return [];
         }
     }
 
     // --- Trading Methods ---
 
-    public async calculateLeverage(): Promise<IExchangeData> {
+    public async calculateLeverage(userId?: number): Promise<IExchangeData> {
         try {
-            const response = await this.getAccountData();
+            const ctx = await this.getContext(userId);
+            const response = await this.getAccountData(ctx);
 
             const account = response?.accounts?.[0];
             if (!account || typeof account.total_asset_value !== 'string' || typeof account.available_balance !== 'string' || !Array.isArray(account.positions)) {
+                // Silent fail for empty accounts
+                if (!account) return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
                 throw new Error('Incomplete or invalid data received from Lighter API.');
             }
 
@@ -191,8 +268,9 @@ export class LighterService {
 
         } catch (err) {
             const message = this.getErrorMessage(err);
-            console.error('Error during Lighter leverage calculation:', err);
-            throw new Error(`Failed to calculate Lighter leverage: ${message}`);
+            console.error(`Error during Lighter leverage calculation (User ${userId}):`, err);
+            // throw new Error(`Failed to calculate Lighter leverage: ${message}`);
+            return { leverage: 0, accountEquity: 0, P_MM_keff: 0 };
         }
     }
 
@@ -200,26 +278,30 @@ export class LighterService {
         symbol: string,
         side: 'BUY' | 'SELL',
         amount: number,
+        userId?: number,
         type: 'LIMIT' | 'MARKET' = 'LIMIT',
         price?: number
     ) {
+        const ctx = await this.getContext(userId);
+        if (!ctx.client) throw new Error('Lighter client not initialized (no keys?)');
+
         // Убеждаемся, что клиент инициализирован перед отправкой
-        if (!this.tradeClient.isInitialized) {
-            await this.tradeClient.init();
+        if (!ctx.client.isInitialized) {
+            await ctx.client.init();
         }
 
-        const marketId = this.tradeClient.getMarketId(symbol);
+        const marketId = ctx.client.getMarketId(symbol);
 
         if (marketId === null) {
             throw new Error(`Symbol '${symbol}' not found on Lighter exchange!`);
         }
 
-        console.log(`[Lighter] Found Market ID for ${symbol}: ${marketId}`);
+        console.log(`[Lighter] Found Market ID for ${symbol}: ${marketId} (User ${userId})`);
 
         const isAsk = side === 'SELL';
         const orderType = type === 'MARKET' ? ORDER_TYPE.MARKET : ORDER_TYPE.LIMIT;
 
-        const result = await this.tradeClient.placeOrder({
+        const result = await ctx.client.placeOrder({
             marketId,
             isAsk,
             orderType,
@@ -232,6 +314,7 @@ export class LighterService {
 
         const fallbackPrice = price || 0;
         const fillDetails = await this.pollTransactionDetails(
+            ctx.client, // Pass user-specific client for polling
             result.txHash,
             marketId,
             amount,
@@ -246,15 +329,15 @@ export class LighterService {
         };
     }
 
-    private async pollTransactionDetails(txHash: string, marketId: number, fallbackQty: number, fallbackPrice: number) {
-        const maxAttempts = 20;
+    private async pollTransactionDetails(client: LighterClient, txHash: string, marketId: number, fallbackQty: number, fallbackPrice: number) {
+        // ОПТИМИЗАЦИЯ ДЛЯ AUTO-CLOSE: Ждем всего 7 секунд (вместо 20)
+        // Если за 7 сек не прошло - считаем сбоем, чтобы успеть закрыть вторую ногу.
+        const maxAttempts = 7;
 
         for (let i = 0; i < maxAttempts; i++) {
             await new Promise(r => setTimeout(r, 1000));
 
-            // Этот метод внутри tradeClient (getTransactionByHash) тоже должен быть защищен таймаутом, 
-            // если вы имеете доступ к его коду.
-            const txData = await this.tradeClient.getTransactionByHash(txHash);
+            const txData = await client.getTransactionByHash(txHash);
 
             if (txData && txData.event_info) {
                 console.log(`✅ [Lighter] Transaction confirmed on attempt ${i + 1}!`);
@@ -264,7 +347,7 @@ export class LighterService {
                     const trade = eventInfo.t;
 
                     if (trade && parseFloat(trade.s) > 0) {
-                        const market = this.tradeClient.markets[marketId];
+                        const market = client.markets[marketId];
                         const sizeMult = 10 ** market.sizeDecimals;
                         const priceMult = 10 ** market.priceDecimals;
 
@@ -310,10 +393,13 @@ export class LighterService {
     }
     // --- Оптимизированный метод для Auto-Close ---
     // Убрали запрос funding-rates
-    public async getSimplePositions(): Promise<IDetailedPosition[]> {
+    public async getSimplePositions(userId?: number): Promise<IDetailedPosition[]> {
         try {
+            const ctx = await this.getContext(userId);
+            if (!ctx.l1Address) return [];
+
             // Только 1 запрос!
-            const response = await this.getAccountData();
+            const response = await this.getAccountData(ctx);
             const account = response?.accounts?.[0];
 
             if (!account || !account.positions) {

@@ -88,8 +88,11 @@ export class AutoTradeController {
         this.processingUsers.add(userId); // 🔒 БЛОКИРОВКА
 
         try {
-            if (this.autoTradeService.isRunning(userId)) {
-                const state = this.userStates.get(userId);
+            const state = this.userStates.get(userId);
+
+            // FIX: Если статус 'running', значит сессия активна (даже если isRunning врет/задержка).
+            // Останавливаем принудительно.
+            if ((state && state.step === 'running') || this.autoTradeService.isRunning(userId)) {
                 this.autoTradeService.stopSession(userId, 'Остановлено кнопкой OPEN POS');
 
                 if (state && state.statusMessageId) {

@@ -82,9 +82,10 @@ export class TotalFundingsController {
         try {
             await ctx.reply('📈 Собираю исторические данные по фандингу... Это может занять до 20-30 секунд.');
 
+            const userId = ctx.from?.id;
             // Получаем объект с двумя массивами от сервиса
             const { hedged, unhedged }: IHistoricalFundingData =
-                await this.totalFundingsService.getHistoricalFunding();
+                await this.totalFundingsService.getHistoricalFunding(userId);
 
             let message = '';
 

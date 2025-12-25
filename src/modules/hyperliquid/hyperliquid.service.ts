@@ -7,6 +7,7 @@ import {
     IAssetNameInfoHyper,
     IAssetDataContextHyper
 } from '../../common/interfaces';
+import { UserService } from '../users/users.service';
 
 // Используем require для SDK, если нет типов
 const { Hyperliquid } = require('hyperliquid');
@@ -16,79 +17,132 @@ type MetaAndAssetCtxsResponse = [{ universe: IAssetNameInfoHyper[] }, IAssetData
 // Константа таймаута для HTTP запросов
 const HTTP_TIMEOUT = 10000;
 
+interface HlContext {
+    userAddress: string;
+    userAddress_main: string;
+    sdk?: any;
+    sdkInitialized: boolean;
+}
+
 export class HyperliquidService {
-    // Конфигурация, которая будет задана в конструкторе
+    // Конфигурация
     private readonly API_URL: string;
     private readonly isTestnet: boolean;
-
-    // Адреса и ключи
-    private readonly userAddress: string;
-    private readonly userAddress_main: string;
-    private readonly privateKey: string;
-
-    // Константы
     private readonly SECONDARY_DEX_ID = 'xyz';
 
-    // SDK
-    private sdk: any = null;
-    private sdkInitialized = false;
+    // Дефолтный контекст (из .env)
+    private defaultContext: HlContext;
+    // Кеш контекстов юзеров
+    private userContexts = new Map<number, HlContext>();
 
-    constructor() {
+    constructor(private userService?: UserService) {
         // 1. Определяем режим работы
         this.isTestnet = process.env.TESTNET === 'true';
 
-        // 2. Настраиваем переменные в зависимости от режима
+        // 2. Настраиваем API URL
         if (this.isTestnet) {
             console.log('🟡 [Hyperliquid] Initializing in TESTNET mode');
             this.API_URL = 'https://api.hyperliquid-testnet.xyz/info';
-
-            this.userAddress = process.env.HL_WALLET_ADDRESS_TEST || '';
-            this.privateKey = process.env.HL_PRIVATE_KEY_TEST || '';
-            this.userAddress_main = process.env.HL_ACCOUNT_ETH_TEST || '';
         } else {
             console.log('🟢 [Hyperliquid] Initializing in MAINNET mode');
             this.API_URL = 'https://api.hyperliquid.xyz/info';
-
-            this.userAddress = process.env.HL_WALLET_ADDRESS || '';
-            this.privateKey = process.env.HL_PRIVATE_KEY || '';
-            this.userAddress_main = process.env.HL_ACCOUNT_ETH || '';
         }
 
-        // 3. Валидация
-        if (!this.userAddress) {
-            throw new Error(`Hyperliquid Wallet Address is missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'} mode.`);
-        }
+        // 3. Создаем дефолтный контекст
+        this.defaultContext = this.createContext(
+            this.isTestnet ? process.env.HL_WALLET_ADDRESS_TEST : process.env.HL_WALLET_ADDRESS,
+            this.isTestnet ? process.env.HL_ACCOUNT_ETH_TEST : process.env.HL_ACCOUNT_ETH,
+            this.isTestnet ? process.env.HL_PRIVATE_KEY_TEST : process.env.HL_PRIVATE_KEY
+        );
 
-        // 4. Инициализация SDK
-        if (this.privateKey) {
-            this.sdk = new Hyperliquid({
-                enableWs: false,
-                privateKey: this.privateKey,
-                testnet: this.isTestnet,
-                walletAddress: this.userAddress,
-            });
-            this.initSdk().catch(err => console.error('Failed to init Hyperliquid SDK:', err));
+        if (!this.defaultContext.userAddress) {
+            // throw new Error не будем, вдруг бот только для других бирж, но варнинг нужен
+            console.warn(`[Hyperliquid] Wallet Address missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'} mode.`);
         } else {
-            console.warn('[Hyperliquid] Private Key missing. Trading functions will not work.');
+            this.initSdk(this.defaultContext).catch(err => console.error('Failed to init Default Hyperliquid SDK:', err));
         }
+    }
+
+    private createContext(address?: string, addressMain?: string, privateKey?: string): HlContext {
+        const ctx: HlContext = {
+            userAddress: address || '',
+            userAddress_main: addressMain || '',
+            sdk: null,
+            sdkInitialized: false
+        };
+
+        if (privateKey && address) {
+            try {
+                ctx.sdk = new Hyperliquid({
+                    enableWs: false,
+                    privateKey: privateKey,
+                    testnet: this.isTestnet,
+                    walletAddress: address,
+                });
+            } catch (e) {
+                console.error('[Hyperliquid] Failed to create SDK instance:', e);
+            }
+        }
+        return ctx;
+    }
+
+    private async getContext(userId?: number): Promise<HlContext> {
+        // Если userId не указан - только для системных операций
+        if (!userId) {
+            if (!this.userService) {
+                return this.defaultContext;
+            }
+            throw new Error('[Hyperliquid] userId is required for user operations');
+        }
+
+        if (this.userContexts.has(userId)) return this.userContexts.get(userId)!;
+
+        // Проверка наличия UserService
+        if (!this.userService) {
+            throw new Error('[Hyperliquid] UserService not available');
+        }
+
+        // Fetch from DB
+        const user = await this.userService.getUser(userId);
+        if (!user) {
+            throw new Error(`[Hyperliquid] User ${userId} not found in database`);
+        }
+
+        const address = (this.isTestnet ? user.hlTestWalletAddress : user.hlWalletAddress) ?? undefined;
+        const addressMain = (this.isTestnet ? user.hlTestAccountEth : user.hlAccountEth) ?? undefined;
+        const pKey = (this.isTestnet ? user.hlTestPrivateKey : user.hlPrivateKey) ?? undefined;
+
+        // Строгая проверка: ключи ОБЯЗАТЕЛЬНЫ
+        if (!address || !pKey) {
+            throw new Error(`[Hyperliquid] User ${userId} has no API keys configured. Please add keys to database.`);
+        }
+
+        const ctx = this.createContext(address, addressMain, pKey);
+
+        // Init SDK immediately if present
+        if (ctx.sdk) {
+            this.initSdk(ctx).catch(e => console.error(`Failed to init HL SDK for user ${userId}`, e));
+        }
+
+        this.userContexts.set(userId, ctx);
+        return ctx;
     }
 
     // --- SDK Helpers ---
 
-    private async initSdk() {
-        if (!this.sdk || this.sdkInitialized) return;
+    private async initSdk(ctx: HlContext) {
+        if (!ctx.sdk || ctx.sdkInitialized) return;
         try {
-            await this.sdk.initialize();
-            this.sdkInitialized = true;
-
+            await ctx.sdk.initialize();
+            ctx.sdkInitialized = true;
         } catch (e) {
             console.error('[Hyperliquid] SDK Initialization error:', e);
         }
     }
 
-    private async ensureSdkReady() {
-        if (!this.sdk) throw new Error('Hyperliquid Private Key is not set.');
-        if (!this.sdkInitialized) await this.initSdk();
+    private async ensureSdkReady(ctx: HlContext) {
+        if (!ctx.sdk) throw new Error('Hyperliquid Private Key is not set.');
+        if (!ctx.sdkInitialized) await this.initSdk(ctx);
     }
 
     private getErrorMessage(error: unknown): string {
@@ -101,17 +155,21 @@ export class HyperliquidService {
 
     // --- Info API Methods (Axios) ---
 
-    private async getAccountState(dex?: string): Promise<IHyperliquidAccountInfo> {
+    private async getAccountState(dex?: string, userId?: number): Promise<IHyperliquidAccountInfo> {
         try {
+            const ctx = await this.getContext(userId);
+
+            // Если адреса нет, смысла запрашивать нет
+            if (!ctx.userAddress_main) return {} as IHyperliquidAccountInfo;
+
             const body: any = {
                 type: 'clearinghouseState',
-                user: this.userAddress_main,
+                user: ctx.userAddress_main,
             };
             if (dex) {
                 body.dex = dex;
             }
 
-            // Добавил таймаут
             const response = await axios.post(this.API_URL, body, { timeout: HTTP_TIMEOUT });
             return response.data || {};
         } catch (error) {
@@ -125,11 +183,11 @@ export class HyperliquidService {
     }
 
     private async fetchContextsForDex(dex?: string): Promise<ICombinedAssetCtxHyper[]> {
+        // Контексты активов ОБЩИЕ для всех, от юзера не зависят
         try {
             const body: any = { type: 'metaAndAssetCtxs' };
             if (dex) body.dex = dex;
 
-            // Добавил таймаут
             const response = await axios.post<MetaAndAssetCtxsResponse>(this.API_URL, body, { timeout: HTTP_TIMEOUT });
             const [meta, contexts] = response.data;
 
@@ -164,14 +222,14 @@ export class HyperliquidService {
         }
     }
 
-    private async _getCoreAccountData(): Promise<{
+    private async _getCoreAccountData(userId?: number): Promise<{
         mainState: IHyperliquidAccountInfo,
         secondaryState: IHyperliquidAccountInfo,
         assetContexts: ICombinedAssetCtxHyper[]
     }> {
         const [mainState, secondaryState, assetContexts] = await Promise.all([
-            this.getAccountState(),
-            this.getAccountState(this.SECONDARY_DEX_ID),
+            this.getAccountState(undefined, userId),
+            this.getAccountState(this.SECONDARY_DEX_ID, userId),
             this.getAssetContexts()
         ]);
 
@@ -184,9 +242,9 @@ export class HyperliquidService {
 
     // --- Public Data Methods ---
 
-    public async getDetailedPositions(): Promise<IDetailedPosition[]> {
+    public async getDetailedPositions(userId?: number): Promise<IDetailedPosition[]> {
         try {
-            const { mainState, secondaryState, assetContexts } = await this._getCoreAccountData();
+            const { mainState, secondaryState, assetContexts } = await this._getCoreAccountData(userId);
 
             const fundingMap = new Map<string, string>(
                 assetContexts.map(asset => [asset.name, asset.funding])
@@ -224,20 +282,20 @@ export class HyperliquidService {
 
         } catch (err) {
             const message = this.getErrorMessage(err);
-            console.error('Error fetching Hyperliquid detailed positions:', err);
+            console.error(`Error fetching Hyperliquid detailed positions (User: ${userId}):`, err);
             throw new Error(`Failed to get detailed positions from Hyperliquid: ${message}`);
         }
     }
 
-    public async getOpenPosition(symbol: string): Promise<IDetailedPosition | undefined> {
+    public async getOpenPosition(symbol: string, userId?: number): Promise<IDetailedPosition | undefined> {
         const cleanSymbol = symbol.replace('-PERP', '');
-        const allPositions = await this.getDetailedPositions();
+        const allPositions = await this.getDetailedPositions(userId);
         return allPositions.find(p => p.coin === cleanSymbol);
     }
 
-    public async calculateLeverage(): Promise<IExchangeData> {
+    public async calculateLeverage(userId?: number): Promise<IExchangeData> {
         try {
-            const { mainState, secondaryState } = await this._getCoreAccountData();
+            const { mainState, secondaryState } = await this._getCoreAccountData(userId);
 
             const extractData = (state: IHyperliquidAccountInfo) => {
                 if (!state.marginSummary) return { val: 0, ntl: 0, maint: 0 };
@@ -275,7 +333,7 @@ export class HyperliquidService {
 
         } catch (err) {
             const message = this.getErrorMessage(err);
-            console.error('Error during Hyperliquid leverage calculation:', err);
+            console.error(`Error during Hyperliquid leverage calculation (User: ${userId}):`, err);
             throw new Error(`Failed to calculate Hyperliquid leverage: ${message}`);
         }
     }
@@ -285,18 +343,16 @@ export class HyperliquidService {
     public async placeMarketOrder(
         symbol: string,
         side: 'BUY' | 'SELL',
-        quantity: number
+        quantity: number,
+        userId?: number // <-- Added
     ): Promise<any> {
         try {
-            await this.ensureSdkReady();
-            console.log(`[Hyperliquid] Placing MARKET order: ${side} ${quantity} ${symbol}`);
+            const ctx = await this.getContext(userId);
+            await this.ensureSdkReady(ctx);
+            console.log(`[Hyperliquid] Placing MARKET order: ${side} ${quantity} ${symbol} (User: ${userId || 'env'})`);
 
             const isBuy = side === 'BUY';
-            // В SDK таймауты зашиты внутри библиотеки, 
-            // но сама инициализация ордера работает через WebSocket/Signing, там HTTP таймаут не поможет.
-            // Однако, мы защитили основные методы сбора данных (getAccountState), 
-            // что предотвращает зависание мониторинга.
-            const result = await this.sdk.custom.marketOpen(symbol, isBuy, quantity);
+            const result = await ctx.sdk.custom.marketOpen(symbol, isBuy, quantity);
 
             const statuses = result.response?.data?.statuses;
             if (!statuses || statuses.length === 0) {
@@ -328,20 +384,19 @@ export class HyperliquidService {
             return responseData;
 
         } catch (err) {
-            console.error('Error placing Hyperliquid order:', err);
+            console.error(`Error placing Hyperliquid order (User: ${userId}):`, err);
             const message = this.getErrorMessage(err);
             throw new Error(`Failed to place order on Hyperliquid: ${message}`);
         }
     }
     // --- Оптимизированный метод для Auto-Close ---
     // Не запрашивает MetaAndAssetCtxs (фандинги), экономит время и лимиты.
-    public async getSimplePositions(): Promise<IDetailedPosition[]> {
+    public async getSimplePositions(userId?: number): Promise<IDetailedPosition[]> {
         try {
             // Запрашиваем только стейт аккаунта (Main + Secondary)
-            // Это 2 параллельных запроса вместо 3 тяжелых
             const [mainState, secondaryState] = await Promise.all([
-                this.getAccountState(),
-                this.getAccountState(this.SECONDARY_DEX_ID)
+                this.getAccountState(undefined, userId),
+                this.getAccountState(this.SECONDARY_DEX_ID, userId)
             ]);
 
             const mapPositions = (positions: any[], exchangeLabel: string): IDetailedPosition[] => {
@@ -355,12 +410,12 @@ export class HyperliquidService {
                         const val = parseFloat(position.positionValue || '0');
 
                         return {
-                            coin: position.coin!, // API возвращает имя монеты (ETH, BTC)
-                            notional: val.toString(),        // Для авто-закрытия не критично
+                            coin: position.coin!,
+                            notional: val.toString(),
                             size: Math.abs(szi),
                             side: szi > 0 ? 'L' : 'S',
                             exchange: exchangeLabel,
-                            fundingRate: 0,       // Экономим время
+                            fundingRate: 0,
                             entryPrice: 0,
                             unrealizedPnl: Math.abs(upnl)
                         };
