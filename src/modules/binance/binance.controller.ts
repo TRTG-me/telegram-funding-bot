@@ -29,10 +29,11 @@ export class BinanceController {
         try {
             await ctx.reply('⏳ Запрашиваю данные вашего Portfolio Margin аккаунта...');
 
-            const a = await this.binanceService.getDetailedPositions()
-            const accountInfo = await this.binanceService.getAccountInfo();
+            const userId = ctx.from?.id;
+            const a = await this.binanceService.getDetailedPositions(userId)
+            const accountInfo = await this.binanceService.getAccountInfo(userId);
 
-            const info = await this.binanceService.calculateLeverage()
+            const info = await this.binanceService.calculateLeverage(userId)
 
             if (isFinite(info.leverage) && isAccountInfoValid(accountInfo)) {
 

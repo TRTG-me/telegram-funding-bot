@@ -23,28 +23,14 @@ export class HyperliquidController {
     // Метод, который срабатывает после ввода адреса
     public async onWalletAddressReceived(ctx: Context<Update.MessageUpdate>, mainMenuKeyboard: ReplyKeyboard): Promise<void> {
         if (!ctx.has(message("text"))) return;
-
         const userId = ctx.from.id;
-        const walletAddress = ctx.message.text.trim();
-        const userAddress = process.env.ACCOUNT_HYPERLIQUID_ETH;
-        if (!userAddress) {
-            console.error('Критическая ошибка: Переменная ACCOUNT_HYPERLIQUID_ETH не найдена в .env');
-            await ctx.reply('❌ Ошибка конфигурации. Не удалось найти адрес кошелька.', mainMenuKeyboard);
-            return;
-        }
+        // const userAddress = process.env.ACCOUNT_HYPERLIQUID_ETH; // Removed
 
-        // Валидация адреса
-        if (!/^0x[a-fA-F0-9]{40}$/.test(userAddress)) {
-            await ctx.reply('❌ Адрес не похож на валидный ETH-кошелек. Попробуйте еще раз.', mainMenuKeyboard);
-            return;
-        }
-
-        this.userState.delete(userId);
         await ctx.reply('⏳ Получаю информацию, это может занять несколько секунд...');
 
         try {
 
-            const summary = await this.hyperliquidService.getDetailedPositions()
+            const summary = await this.hyperliquidService.getDetailedPositions(userId)
             console.log(summary)
             // // 1. Вызываем сервис и получаем чистый ОБЪЕКТ С ДАННЫМИ
             // const summary: FullAccountSummary = await this.hyperliquidService.getAccountSummary(userAddress);

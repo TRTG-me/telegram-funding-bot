@@ -13,16 +13,14 @@ import { IExchangeData, IDetailedPosition, IAccountInfoBin, IPositionInfoBin } f
 import { UserService } from '../users/users.service';
 
 export class BinanceService {
-    // Дефолтный клиент (из .env)
-    private defaultClient: DerivativesTradingPortfolioMargin | DerivativesTradingUsdsFutures;
-    // Кеш клиентов для юзеров
+    // Кеш клиентов для юзеров (TelegramId -> Client)
     private clients = new Map<number, DerivativesTradingPortfolioMargin | DerivativesTradingUsdsFutures>();
 
     private readonly isTestnet: boolean;
     private timeOffset = 0;
     private lastRttMs = 0;
 
-    constructor(private userService?: UserService) {
+    constructor(private userService: UserService) {
         // 1. Определение режима из .env
         this.isTestnet = process.env.TESTNET === 'true';
         if (this.isTestnet) {
@@ -30,12 +28,6 @@ export class BinanceService {
         } else {
             console.log('🟢 [Binance] Initializing in MAINNET mode');
         }
-
-        // Инициализация дефолтного клиента (для обратной совместимости)
-        this.defaultClient = this.createClient(
-            this.isTestnet ? process.env.BINANCE_API_KEY_TEST : process.env.BINANCE_API_KEY,
-            this.isTestnet ? process.env.BINANCE_API_SECRET_TEST : process.env.BINANCE_API_SECRET
-        );
 
         // Синхронизация времени
         this.syncTime().catch(() => { });
@@ -45,8 +37,7 @@ export class BinanceService {
     // Хелпер создания клиента
     private createClient(apiKey?: string, apiSecret?: string): any {
         if (!apiKey || !apiSecret) {
-            console.warn(`[Binance] Keys missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'}. Default client might fail.`);
-            // Возвращаем заглушку или null, но лучше пусть упадет при попытке вызова, чем при старте
+            // throw new Error(`[Binance] Keys missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'}.`); // Не будем кидать ошибку при создании, просто вернем null
             return null;
         }
 
@@ -69,14 +60,10 @@ export class BinanceService {
         }
     }
 
-    // Получение клиента для конкретного юзера (или дефолтного)
+    // Получение клиента для конкретного юзера
     private async getClient(userId?: number): Promise<any> {
-        // Если юзер не указан - используем дефолтный (.env) только для системных операций
         if (!userId) {
-            if (!this.userService) {
-                return this.defaultClient;
-            }
-            throw new Error('[Binance] userId is required for user operations');
+            throw new Error('[Binance] userId is required for all operations');
         }
 
         // Проверяем кеш
@@ -101,7 +88,7 @@ export class BinanceService {
 
         // Строгая проверка: ключи ОБЯЗАТЕЛЬНЫ
         if (!apiKey || !apiSecret) {
-            throw new Error(`[Binance] User ${userId} has no API keys configured. Please add keys to database.`);
+            throw new Error(`[Binance] User ${userId} has no API keys configured for ${this.isTestnet ? 'Testnet' : 'Mainnet'}. Please add keys to database.`);
         }
 
         // Создаем и кешируем

@@ -30,10 +30,10 @@ export class ExtendedService {
     private readonly isTestnet: boolean;
     private readonly apiUrl: string;
 
-    private defaultContext: ExtendedContext;
+    // private defaultContext: ExtendedContext; // Removed
     private userContexts = new Map<number, ExtendedContext>();
 
-    constructor(private userService?: UserService) {
+    constructor(private userService: UserService) {
         this.isTestnet = process.env.TESTNET === 'true';
 
         this.apiUrl = this.isTestnet
@@ -45,26 +45,6 @@ export class ExtendedService {
         } else {
             console.log('🟢 [Extended] Initializing in MAINNET mode');
         }
-
-        let apiKey: string, privateKey: string, publicKey: string, vaultId: string;
-
-        if (this.isTestnet) {
-            apiKey = process.env.EXTENDED_API_KEY_TEST || '';
-            privateKey = process.env.EXTENDED_STARK_KEY_PRIVATE_TEST || '';
-            publicKey = process.env.EXTENDED_STARK_KEY_PUBLIC_TEST || '';
-            vaultId = process.env.EXTENDED_VAULTID_TEST || '';
-        } else {
-            apiKey = process.env.EXTENDED_API_KEY || '';
-            privateKey = process.env.EXTENDED_STARK_KEY_PRIVATE || '';
-            publicKey = process.env.EXTENDED_STARK_KEY_PUBLIC || '';
-            vaultId = process.env.EXTENDED_VAULTID || '';
-        }
-
-        this.defaultContext = { apiKey, privateKey, publicKey, vaultId };
-
-        if (!this.defaultContext.apiKey) {
-            console.warn(`[Extended] API Key is missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'}`);
-        }
     }
 
     private createContext(apiKey: string, privateKey: string, publicKey: string, vaultId: string): ExtendedContext {
@@ -72,12 +52,8 @@ export class ExtendedService {
     }
 
     private async getContext(userId?: number): Promise<ExtendedContext> {
-        // Если userId не указан - только для системных операций
         if (!userId) {
-            if (!this.userService) {
-                return this.defaultContext;
-            }
-            throw new Error('[Extended] userId is required for user operations');
+            throw new Error('[Extended] userId is required for all operations');
         }
 
         if (this.userContexts.has(userId)) return this.userContexts.get(userId)!;

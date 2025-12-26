@@ -220,7 +220,8 @@ export class AutoTradeSession {
         }
         const qtyToTrade = Helpers.roundFloat(Math.min(stepQuantity, remaining), 3);
 
-        await onUpdate(`⚡️ <b>Итерация #${this.iteration}</b> (BP: ${currentMarketBp.toFixed(1)})\nВход ${qtyToTrade}...`);
+        const estimatedUsdValue = Math.round(qtyToTrade * this.currentLongAsk);
+        await onUpdate(`⚡️ <b>Итерация #${this.iteration}</b> (BP: ${currentMarketBp.toFixed(1)})\nВход: <b>${qtyToTrade} ${this.config.coin}</b> (${estimatedUsdValue}$)`);
 
         try {
             // ПРОВЕРКА ПЕРЕД ОТПРАВКОЙ ОРДЕРОВ (C1 FIX)

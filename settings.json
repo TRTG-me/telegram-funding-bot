@@ -1,21 +1,21 @@
 {
-    "leverage": {
-        "green": {
-            "value": 5.0,
-            "emoji": "✅"
-        },
-        "yellow": {
-            "value": 6.0,
-            "emoji": "☢️"
-        },
-        "red": {
-            "value": 7.0,
-            "emoji": "🛑"
-        }
+  "leverage": {
+    "green": {
+      "value": 5,
+      "emoji": "✅"
     },
-    "adl": {
-        "target": 0.4,
-        "warn": 0.6,
-        "trigger": 0.7
+    "yellow": {
+      "value": 6,
+      "emoji": "☢️"
+    },
+    "red": {
+      "value": 7,
+      "emoji": "🛑"
     }
+  },
+  "adl": {
+    "target": 0.5,
+    "warn": 0.6,
+    "trigger": 0.7
+  }
 }

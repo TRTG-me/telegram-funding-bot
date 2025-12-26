@@ -3,56 +3,38 @@ import { ExtendedService } from '../extended/extended.service';
 import { HyperliquidService } from '../hyperliquid/hyperliquid.service';
 import { LighterService } from '../lighter/lighter.service';
 import { ParadexService } from '../paradex/paradex.service';
-import * as fs from 'fs/promises';
-import * as path from 'path';
-
-interface Rank {
-    min: number;
-    max: number;
-    emoji: string;
-}
+import { SettingsService } from '../settings/settings.service';
 
 // Интерфейс данных, которые уйдут в контроллер
 export interface FormattedExchangeData {
     name: string;
     leverage: number;
     accountEquity: number;
-    P_MM_keff: number; // <--- Добавили поле
+    P_MM_keff: number;
     emoji: string;
 }
 
 export class SummaryService {
-    private ranks: Rank[] = [];
-
     constructor(
         private readonly binanceService: BinanceService,
         private readonly hyperliquidService: HyperliquidService,
         private readonly paradexService: ParadexService,
         private readonly lighterService: LighterService,
-        private readonly extendedService: ExtendedService
-    ) {
-        this.loadRanks();
-    }
+        private readonly extendedService: ExtendedService,
+        private readonly settingsService: SettingsService
+    ) { }
 
-    private async loadRanks(): Promise<Rank[]> {
-        try {
-            const ranksPath = path.join(__dirname, '..', '..', '..', 'ranking-config.json');
-            const data = await fs.readFile(ranksPath, 'utf-8');
-            return JSON.parse(data);
-        } catch (error) {
-            console.error('Ошибка при загрузке рангов:', error);
-            return [];
-        }
-    }
+    public getEmojiForLeverage(leverage: number): string {
+        const settings = this.settingsService.getSettings();
+        const { green, yellow, red } = settings.leverage;
 
-    public getEmojiForLeverage(leverage: number, ranks: Rank[]): string {
-        const rank = ranks.find(r => leverage >= r.min && leverage < r.max);
-        return rank ? rank.emoji : '❓';
+        if (leverage >= red.value) return red.emoji;
+        if (leverage >= yellow.value) return yellow.emoji;
+
+        return green.emoji;
     }
 
     public async getFormattedSummaryData(userId?: number): Promise<FormattedExchangeData[]> {
-        const ranks = await this.loadRanks();
-
         const results = await Promise.allSettled([
             this.binanceService.calculateLeverage(userId),
             this.hyperliquidService.calculateLeverage(userId),
@@ -67,17 +49,15 @@ export class SummaryService {
             const name = exchangeNames[index];
 
             if (result.status === 'fulfilled') {
-                // Извлекаем все поля, включая новый коэффициент
-                // (Typescript должен знать об этом поле через IExchangeData в common/interfaces)
                 const { leverage, accountEquity, P_MM_keff } = result.value;
 
-                const emoji = this.getEmojiForLeverage(leverage, ranks);
+                const emoji = this.getEmojiForLeverage(leverage);
 
                 return {
                     name,
                     leverage,
                     accountEquity,
-                    P_MM_keff: P_MM_keff || 0, // Защита от undefined
+                    P_MM_keff: P_MM_keff || 0,
                     emoji
                 };
             } else {
