@@ -17,8 +17,9 @@ export class ParadexController {
             await ctx.reply('⏳ Выполняю запрос к Paradex, это может занять несколько секунд...');
 
             // 1. Вызываем новый метод сервиса, который делает всю работу
-            const accInfo = await this.paradexService.calculateLeverage();
-            const posInfo = await this.paradexService.getDetailedPositions();
+            const userId = ctx.from?.id;
+            const accInfo = await this.paradexService.calculateLeverage(userId);
+            const posInfo = await this.paradexService.getDetailedPositions(userId);
             console.log(posInfo)
 
             // 2. Форматируем полученное число для красивого вывода

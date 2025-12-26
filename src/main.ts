@@ -17,29 +17,26 @@ import { ExtendedTickerService } from './modules/extended/websocket/extended.tic
 import { LighterTickerService } from './modules/lighter/websocket/lighter.ticker.service';
 
 // --- Aggregator Services ---
-import { RankingService } from './modules/ranking/ranking.service';
 import { SummaryService } from './modules/summary/summary.service';
 import { TotalPositionsService } from './modules/totalPositions/totalPositions.service';
 import { TotalFundingsService } from './modules/totalFundings/totalFundings.service';
-import { NotificationService } from './modules/notifications/notification.service';
 import { BpService } from './modules/bp/bp.service';
 import { AutoTradeService } from './modules/auto_trade/auto_trade.service';
 import { AutoCloseService } from './modules/auto_close/auto_close.service';
 import { UserService } from './modules/users/users.service';
+import { SettingsService } from './modules/settings/settings.service';
 
 // --- Controllers ---
-import { RankingController } from './modules/ranking/ranking.controller';
 import { SummaryController } from './modules/summary/summary.controller';
 import { TotalPositionsController } from './modules/totalPositions/totalPositions.controller';
 import { TotalFundingsController } from './modules/totalFundings/totalFundings.controller';
-import { NotificationController } from './modules/notifications/notification.controller';
-import { BinanceTickerController } from './modules/binance/websocket/binance.ticker.controller';
 import { BpController } from './modules/bp/bp.controller';
 import { AutoTradeController } from './modules/auto_trade/auto_trade.controller';
 import { ExtendedTradeController } from './modules/extended/extended.trade.controller';
 import { LighterController } from './modules/lighter/lighter.controller';
 import { AutoCloseController } from './modules/auto_close/auto_close.controller';
 import { UsersController } from './modules/users/users.controller';
+import { SettingsController } from './modules/settings/settings.controller';
 
 // ============================================================
 // ГЛОБАЛЬНАЯ ЗАЩИТА (ЧТОБЫ НЕ ПАДАЛО ПРИ ОШИБКАХ СЕТИ)
@@ -72,8 +69,7 @@ process.on('unhandledRejection', (reason, promise) => {
 // --- Keyboard ---
 const mainMenuKeyboard = Markup.keyboard([
     ['Плечи', 'Позиции', 'Фандинги', 'bp', 'OPEN POS'],
-    ['Включить Alert', 'Выключить Alert', '✏️Изменить ранги'],
-    ['🚀 Запустить тикер', '🛑 Остановить тикер']
+    ['Ручная проверка', 'Автоматическая проверка', 'Настройки']
 ]).resize();
 
 const userState = new Map<number, string>();
@@ -101,10 +97,10 @@ async function start() {
     const lighterTickerService = new LighterTickerService();
 
     // Сервисы бизнес-логики
-    const rankingService = new RankingService();
+    const settingsService = new SettingsService();
 
     const summaryService = new SummaryService(
-        binanceService, hyperliquidService, paradexService, lighterService, extendedService
+        binanceService, hyperliquidService, paradexService, lighterService, extendedService, settingsService
     );
 
     const totalPositionsService = new TotalPositionsService(
@@ -113,10 +109,6 @@ async function start() {
 
     const totalFundingsService = new TotalFundingsService(
         totalPositionsService
-    );
-
-    const notificationService = new NotificationService(
-        bot, binanceService, hyperliquidService, paradexService, lighterService, extendedService
     );
 
     const bpService = new BpService(
@@ -135,25 +127,24 @@ async function start() {
         hyperliquidService,
         paradexService,
         lighterService,
-        extendedService
+        extendedService,
+        settingsService
     );
 
     // ============================================================
     // 2. ИНИЦИАЛИЗАЦИЯ КОНТРОЛЛЕРОВ (СЛОЙ ВЗАИМОДЕЙСТВИЯ)
     // ============================================================
 
-    const rankingController = new RankingController(rankingService, userState);
     const summaryController = new SummaryController(summaryService);
     const totalPositionsController = new TotalPositionsController(totalPositionsService);
     const totalFundingsController = new TotalFundingsController(totalFundingsService);
-    const notificationController = new NotificationController(notificationService);
-    const binanceTickerController = new BinanceTickerController(binanceTickerService);
     const bpController = new BpController(bpService);
     const autoTradeController = new AutoTradeController(autoTradeService);
     const extendedTradeController = new ExtendedTradeController(extendedService);
     const lighterController = new LighterController(lighterService);
     const autoCloseController = new AutoCloseController(autoCloseService);
     const usersController = new UsersController(userService);
+    const settingsController = new SettingsController(settingsService, userState);
 
     // ============================================================
     // 3. ОБРАБОТЧИКИ TELEGRAM
@@ -182,6 +173,10 @@ async function start() {
         if (data && (data.startsWith('at_') || data === 'stop_autotrade')) {
             return autoTradeController.handleCallback(ctx);
         }
+
+        if (data && data.startsWith('settings_')) {
+            return settingsController.handleCallback(ctx);
+        }
     });
 
     // Обработка текста
@@ -203,17 +198,12 @@ async function start() {
             }
         }
         const mainMenuCommands = [
-            'Плечи', 'Позиции', 'Фандинги',
-            'Включить Alert', 'Выключить Alert', '✏️Изменить ранги',
-            '🚀 Запустить тикер', '🛑 Остановить тикер', 'bp',
-            'OPEN POS'
+            'Плечи', 'Позиции', 'Фандинги', 'bp', 'OPEN POS',
+            'Ручная проверка', 'Автоматическая проверка', 'Настройки'
         ];
 
-        // Обратите внимание: текст должен точно совпадать (в вашем коде было '✏️ Изменить ранги' vs '✏️Изменить ранги')
-        // Я унифицировал список выше.
-
-        if (mainMenuCommands.includes(text) || text === '✏️ Изменить ранги') { // на всякий случай оба варианта
-            userState.delete(userId); // Сброс состояний рангов
+        if (mainMenuCommands.includes(text)) {
+            userState.delete(userId);
 
             switch (text) {
                 case 'Плечи':
@@ -222,27 +212,16 @@ async function start() {
                     return totalPositionsController.displayAggregatedPositions(ctx);
                 case 'Фандинги':
                     return totalFundingsController.displayHistoricalFunding(ctx);
-                case '✏️ Изменить ранги':
-                case '✏️Изменить ранги':
-                    return rankingController.onUpdateRanksRequest(ctx);
-                case 'Включить Alert':
-                    return notificationController.startMonitoring(ctx);
-                case 'Выключить Alert':
-                    return notificationController.stopMonitoring(ctx);
-                case '🚀 Запустить тикер':
-                    //return binanceTickerController.startTicker(ctx);
-                    return autoCloseController.handleManualCheck(ctx);
-                // return lighterController.handleTestLimitOrder(ctx);
-                case '🛑 Остановить тикер':
-                    //return binanceTickerController.stopTicker(ctx);
-                    return autoCloseController.handleToggleMonitor(ctx);
                 case 'bp':
                     return bpController.handleBpCommand(ctx);
                 case 'OPEN POS':
-                    // Сейчас стоит Lighter Test. Когда будете готовы, раскомментируйте AutoTrade.                   
                     return autoTradeController.handleOpenPosCommand(ctx);
-                //return autoCloseController.handleManualCheck(ctx);
-
+                case 'Ручная проверка':
+                    return autoCloseController.handleManualCheck(ctx);
+                case 'Автоматическая проверка':
+                    return autoCloseController.handleToggleMonitor(ctx);
+                case 'Настройки':
+                    return settingsController.onSettingsCommand(ctx);
             }
             return;
         }
@@ -262,8 +241,8 @@ async function start() {
         // --- ЛОГИКА 3: ДРУГИЕ СОСТОЯНИЯ ---
         const currentState = userState.get(userId);
 
-        if (currentState === 'awaiting_ranks_json') {
-            return rankingController.onRanksJsonReceived(ctx);
+        if (currentState === 'awaiting_settings_json') {
+            return settingsController.onSettingsJsonReceived(ctx);
         }
         else {
             ctx.reply('Неизвестная команда. Пожалуйста, используйте кнопки внизу.', mainMenuKeyboard);
@@ -281,7 +260,7 @@ async function start() {
 
     const gracefulShutdown = (signal: string) => {
         console.log(`\n[Graceful Shutdown] Получен сигнал ${signal}. Завершение...`);
-        notificationService.stopAllMonitors();
+        autoCloseService.stopAll();
         // Можно добавить: bpService.stop(), autoTradeService.stopSession()...
         bot.stop(signal);
         console.log('[Graceful Shutdown] Готово.');

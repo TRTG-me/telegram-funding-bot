@@ -17,45 +17,18 @@ export class LighterService {
     private readonly isTestnet: boolean;
     private readonly API_URL: string;
 
-    private defaultContext: LighterContext;
+    // private defaultContext: LighterContext; // Removed
     private userContexts = new Map<number, LighterContext>();
 
-    constructor(private userService?: UserService) {
+    constructor(private userService: UserService) {
         this.isTestnet = process.env.TESTNET === 'true';
-
-        let l1Address: string;
-        let privateKey: string;
-        let apiKeyIndex: number;
-        let accountIndex: string | number;
 
         if (this.isTestnet) {
             console.log('🟡 [Lighter] Initializing in TESTNET mode');
             this.API_URL = 'https://testnet.zklighter.elliot.ai/api/v1';
-
-            l1Address = process.env.LIGHTER_L1_ADDRESS_TEST || '';
-            privateKey = process.env.LIGHTER_API_KEY_PRIVATE_KEY_TEST || '';
-            apiKeyIndex = Number(process.env.LIGHTER_API_KEY_INDEX_TEST || 0);
-            accountIndex = process.env.LIGHTER_ACCOUNT_INDEX_TEST || 0;
         } else {
             console.log('🟢 [Lighter] Initializing in MAINNET mode');
             this.API_URL = 'https://mainnet.zklighter.elliot.ai/api/v1';
-
-            l1Address = process.env.LIGHTER_L1_ADDRESS || '';
-            privateKey = process.env.LIGHTER_API_KEY_PRIVATE_KEY || '';
-            apiKeyIndex = Number(process.env.LIGHTER_API_KEY_INDEX || 0);
-            accountIndex = process.env.LIGHTER_ACCOUNT_INDEX || 0;
-        }
-
-        // Init Default Context
-        this.defaultContext = this.createContext(l1Address, privateKey, apiKeyIndex, accountIndex);
-
-        if (!this.defaultContext.l1Address) {
-            console.warn(`[Lighter] L1 Address missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'} mode.`);
-        }
-
-        // Init default client
-        if (this.defaultContext.client) {
-            this.defaultContext.client.init().catch(e => console.error('Lighter Default Client Init Error:', e));
         }
     }
 
@@ -79,12 +52,8 @@ export class LighterService {
     }
 
     private async getContext(userId?: number): Promise<LighterContext> {
-        // Если userId не указан - только для системных операций
         if (!userId) {
-            if (!this.userService) {
-                return this.defaultContext;
-            }
-            throw new Error('[Lighter] userId is required for user operations');
+            throw new Error('[Lighter] userId is required for all operations');
         }
 
         if (this.userContexts.has(userId)) return this.userContexts.get(userId)!;

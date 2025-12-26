@@ -6,6 +6,7 @@ import { LighterService } from '../lighter/lighter.service';
 import { ExtendedService } from '../extended/extended.service';
 import { ITradingServices } from '../auto_trade/auto_trade.helpers';
 import { AutoCloseSession } from './auto_close.session';
+import { SettingsService } from '../settings/settings.service';
 
 @Injectable()
 export class AutoCloseService {
@@ -17,7 +18,8 @@ export class AutoCloseService {
         private hyperliquidService: HyperliquidService,
         private paradexService: ParadexService,
         private lighterService: LighterService,
-        private extendedService: ExtendedService
+        private extendedService: ExtendedService,
+        private settingsService: SettingsService
     ) { }
 
     private get tradingServices(): ITradingServices {
@@ -40,7 +42,7 @@ export class AutoCloseService {
             return;
         }
 
-        const session = new AutoCloseSession(userId, this.tradingServices);
+        const session = new AutoCloseSession(userId, this.tradingServices, this.settingsService);
         this.sessions.set(userId, session);
         session.start(notifyCallback);
     }
@@ -63,12 +65,19 @@ export class AutoCloseService {
 
         // Если сессии нет, создаем временную (без запуска start())
         if (!session) {
-            session = new AutoCloseSession(userId, this.tradingServices);
+            session = new AutoCloseSession(userId, this.tradingServices, this.settingsService);
         }
 
         const { logs: riskLogs } = await session.checkAndReduceRisk();
         const { logs: adlLogs } = await session.checkAndFixHyperliquidADL();
 
         return { riskLogs, adlLogs };
+    }
+
+    public stopAll() {
+        for (const session of this.sessions.values()) {
+            session.stop();
+        }
+        this.sessions.clear();
     }
 }

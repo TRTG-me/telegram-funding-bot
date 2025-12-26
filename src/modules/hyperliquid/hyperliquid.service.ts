@@ -30,12 +30,12 @@ export class HyperliquidService {
     private readonly isTestnet: boolean;
     private readonly SECONDARY_DEX_ID = 'xyz';
 
-    // Дефолтный контекст (из .env)
-    private defaultContext: HlContext;
+    // Дефолтный контекст (из .env) - REMOVED
+    // private defaultContext: HlContext;
     // Кеш контекстов юзеров
     private userContexts = new Map<number, HlContext>();
 
-    constructor(private userService?: UserService) {
+    constructor(private userService: UserService) {
         // 1. Определяем режим работы
         this.isTestnet = process.env.TESTNET === 'true';
 
@@ -46,20 +46,6 @@ export class HyperliquidService {
         } else {
             console.log('🟢 [Hyperliquid] Initializing in MAINNET mode');
             this.API_URL = 'https://api.hyperliquid.xyz/info';
-        }
-
-        // 3. Создаем дефолтный контекст
-        this.defaultContext = this.createContext(
-            this.isTestnet ? process.env.HL_WALLET_ADDRESS_TEST : process.env.HL_WALLET_ADDRESS,
-            this.isTestnet ? process.env.HL_ACCOUNT_ETH_TEST : process.env.HL_ACCOUNT_ETH,
-            this.isTestnet ? process.env.HL_PRIVATE_KEY_TEST : process.env.HL_PRIVATE_KEY
-        );
-
-        if (!this.defaultContext.userAddress) {
-            // throw new Error не будем, вдруг бот только для других бирж, но варнинг нужен
-            console.warn(`[Hyperliquid] Wallet Address missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'} mode.`);
-        } else {
-            this.initSdk(this.defaultContext).catch(err => console.error('Failed to init Default Hyperliquid SDK:', err));
         }
     }
 
@@ -87,12 +73,8 @@ export class HyperliquidService {
     }
 
     private async getContext(userId?: number): Promise<HlContext> {
-        // Если userId не указан - только для системных операций
         if (!userId) {
-            if (!this.userService) {
-                return this.defaultContext;
-            }
-            throw new Error('[Hyperliquid] userId is required for user operations');
+            throw new Error('[Hyperliquid] userId is required for all operations');
         }
 
         if (this.userContexts.has(userId)) return this.userContexts.get(userId)!;

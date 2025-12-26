@@ -17,8 +17,9 @@ export class ExtendedController {
             await ctx.reply('⏳ Выполняю запрос к Extended Exchange...');
 
             // 1. Вызываем единый метод сервиса, который делает всю работу
-            const accInfo = await this.extendedService.calculateLeverage();
-            const posInfo = await this.extendedService.getDetailedPositions();
+            const userId = ctx.from?.id;
+            const accInfo = await this.extendedService.calculateLeverage(userId);
+            const posInfo = await this.extendedService.getDetailedPositions(userId);
             // 2. Форматируем полученное число для красивого вывода
             const formattedLeverage = accInfo.leverage.toFixed(2);
             const formattedEquity = accInfo.accountEquity.toFixed(2);

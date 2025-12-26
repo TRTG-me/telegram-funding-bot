@@ -95,13 +95,12 @@ export class AutoTradeController {
             if ((state && state.step === 'running') || this.autoTradeService.isRunning(userId)) {
                 this.autoTradeService.stopSession(userId, 'Остановлено кнопкой OPEN POS');
 
-                if (state && state.statusMessageId) {
-                    try {
-                        await ctx.telegram.editMessageText(userId, state.statusMessageId, undefined, '🛑 <b>Набор остановлен вручную.</b>', { parse_mode: 'HTML' });
-                    } catch { }
-                } else {
-                    await ctx.reply('🛑 <b>Набор остановлен вручную.</b>', { parse_mode: 'HTML', ...MAIN_KEYBOARD });
-                }
+                // Изменено по просьбе: сообщение пишется в конце, а не редактирует дашборд
+                await ctx.reply('🛑 <b>Набор остановлен вручную.</b>', { parse_mode: 'HTML', ...MAIN_KEYBOARD });
+
+                // Сбрасываем ID сообщения, чтобы onFinished (если вызовется) не пытался редактировать его снова
+                // или позволим onFinished пометить его как "Сессия завершена" корректно.
+                // Лучше оставить как есть, onFinished добьет статус дашборда до "Завершено".
                 this.userStates.delete(userId);
                 this.userStateTimestamps.delete(userId); // C3 FIX
                 this.processingUsers.delete(userId); // 🔓 НЕМЕДЛЕННАЯ РАЗБЛОКИРОВКА

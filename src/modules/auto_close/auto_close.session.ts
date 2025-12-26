@@ -4,17 +4,10 @@ import * as Helpers from '../auto_trade/auto_trade.helpers';
 import { ITradingServices } from '../auto_trade/auto_trade.helpers';
 import { ExchangeName } from '../auto_trade/auto_trade.types';
 import { IDetailedPosition } from '../../common/interfaces';
+import { SettingsService } from '../settings/settings.service';
 
-// --- КОНФИГУРАЦИЯ РИСКОВ ---
-const TARGET_LEVERAGE = 5;        // Цель (куда возвращаемся)
-const WARN_LEVERAGE = 5.3;          // Желтая зона (только уведомление)
-const TRIGGER_LEVERAGE = 5.4;       // Красная зона (автоматическая резка)
+// --- КОНФИГУРАЦИЯ ---
 const ALLOW_UNHEDGED_CLOSE = true;
-
-// --- КОНФИГУРАЦИЯ ADL (Hyperliquid) ---
-const ADL_TARGET_PNL_RATIO = 0.5;   // Цель (куда возвращаем PnL)
-const ADL_WARN_PNL_RATIO = 0.6;     // Желтая зона ADL (уведомление)
-const ADL_TRIGGER_PNL_RATIO = 0.7;  // Красная зона ADL (резка)
 
 // --- ТАЙМЕРЫ ---
 const NORMAL_INTERVAL_MS = 30 * 1000;
@@ -36,7 +29,8 @@ export class AutoCloseSession {
 
     constructor(
         public readonly userId: number,
-        private readonly services: ITradingServices
+        private readonly services: ITradingServices,
+        private readonly settingsService: SettingsService
     ) { }
 
     // =========================================================================
@@ -137,6 +131,11 @@ export class AutoCloseSession {
     public async checkAndReduceRisk(): Promise<{ logs: string[], actionTaken: boolean }> {
         const logs: string[] = [];
         let actionTaken = false;
+
+        const settings = this.settingsService.getSettings();
+        const TARGET_LEVERAGE = settings.leverage.green.value;
+        const WARN_LEVERAGE = settings.leverage.yellow.value;
+        const TRIGGER_LEVERAGE = settings.leverage.red.value;
 
         const exchangeServices: Record<ExchangeName, any> = {
             'Binance': this.services.binance,
@@ -347,6 +346,11 @@ export class AutoCloseSession {
     public async checkAndFixHyperliquidADL(): Promise<{ logs: string[], actionTaken: boolean }> {
         const logs: string[] = [];
         let actionTaken = false;
+
+        const settings = this.settingsService.getSettings();
+        const ADL_TARGET_PNL_RATIO = settings.adl.target;
+        const ADL_WARN_PNL_RATIO = settings.adl.warn;
+        const ADL_TRIGGER_PNL_RATIO = settings.adl.trigger;
 
         try {
             const positions = await this.services.hl.getSimplePositions(this.userId);

@@ -36,10 +36,10 @@ export class ParadexService {
     private readonly TOKEN_LIFETIME_SECONDS = 300;
 
     // --- КЛЮЧИ ---
-    private defaultContext: ParadexContext;
+    // private defaultContext: ParadexContext; // Removed default context
     private userContexts = new Map<number, ParadexContext>();
 
-    constructor(private userService?: UserService) {
+    constructor(private userService: UserService) {
         this.isTestnet = process.env.TESTNET === 'true';
 
         if (this.isTestnet) {
@@ -50,22 +50,6 @@ export class ParadexService {
             console.log('🟢 [Paradex] Initializing in MAINNET mode');
             this.apiUrl = 'https://api.prod.paradex.trade/v1';
             this.chainId = shortString.encodeShortString("PRIVATE_SN_PARACLEAR_MAINNET");
-        }
-
-        // Init Default Context
-        const address = this.isTestnet ? process.env.PARADEX_TESTNET_ACCOUNT_ADDRESS : (process.env.PARADEX_ACCOUNT_ADDRESS || process.env.ACCOUNT_ADDRESS);
-        const pKey = this.isTestnet ? process.env.PARADEX_TESTNET_PRIVATE_KEY : (process.env.PARADEX_ACCOUNT_PRIVATE_KEY || process.env.ACCOUNT_PRIVATE_KEY);
-
-        this.defaultContext = {
-            accountAddress: address || '',
-            privateKey: pKey || '',
-            jwtToken: null,
-            tokenExpiration: 0
-        };
-
-        if (!this.defaultContext.accountAddress || !this.defaultContext.privateKey) {
-            // Warn only
-            console.warn(`[Paradex] Address/Key missing for ${this.isTestnet ? 'TESTNET' : 'MAINNET'}`);
         }
     }
 
@@ -79,12 +63,8 @@ export class ParadexService {
     }
 
     private async getContext(userId?: number): Promise<ParadexContext> {
-        // Если userId не указан - только для системных операций
         if (!userId) {
-            if (!this.userService) {
-                return this.defaultContext;
-            }
-            throw new Error('[Paradex] userId is required for user operations');
+            throw new Error('[Paradex] userId is required for all operations');
         }
 
         if (this.userContexts.has(userId)) return this.userContexts.get(userId)!;
@@ -104,7 +84,7 @@ export class ParadexService {
 
         // Строгая проверка: ключи ОБЯЗАТЕЛЬНЫ
         if (!address || !pKey) {
-            throw new Error(`[Paradex] User ${userId} has no API keys configured. Please add keys to database.`);
+            throw new Error(`[Paradex] User ${userId} has no API keys configured for ${this.isTestnet ? 'Testnet' : 'Mainnet'}. Please add keys to database.`);
         }
 
         const ctx = this.createContext(address, pKey);
