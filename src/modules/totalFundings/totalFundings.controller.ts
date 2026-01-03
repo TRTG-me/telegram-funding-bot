@@ -18,6 +18,7 @@ export class TotalFundingsController {
             'Coin'.padEnd(8),
             'Notional'.padEnd(12),
             'Ex'.padEnd(8),
+            '8H'.padEnd(8),
             '1D'.padEnd(8),
             '3D'.padEnd(8),
             '7D'.padEnd(8),
@@ -31,11 +32,12 @@ export class TotalFundingsController {
                 const coin = row.coin.padEnd(8);
                 const notional = (row.notional.toString() + '$').padEnd(12);
                 const exchanges = row.exchanges.padEnd(8);
+                const fd8h = (row.funding_8h.toFixed(2) + '%').padEnd(8);
                 const fd1 = (row.funding_1d.toFixed(2) + '%').padEnd(8);
                 const fd3 = (row.funding_3d.toFixed(2) + '%').padEnd(8);
                 const fd7 = (row.funding_7d.toFixed(2) + '%').padEnd(8);
                 const fd14 = (row.funding_14d.toFixed(2) + '%').padEnd(8);
-                table += `${coin}${notional}${exchanges}${fd1}${fd3}${fd7}${fd14}\n`;
+                table += `${coin}${notional}${exchanges}${fd8h}${fd1}${fd3}${fd7}${fd14}\n`;
             });
         } else {
             table += 'Хеджированные пары не найдены.\n';
@@ -52,6 +54,7 @@ export class TotalFundingsController {
             'Notional'.padEnd(12),
             'Ex'.padEnd(6),
             'Side'.padEnd(6),
+            '8H'.padEnd(8),
             '1D'.padEnd(8),
             '3D'.padEnd(8),
             '7D'.padEnd(8),
@@ -66,11 +69,12 @@ export class TotalFundingsController {
                 const notional = (row.notional.toString() + '$').padEnd(12);
                 const exchange = row.exchange.padEnd(6);
                 const side = row.side.padEnd(6);
+                const fd8h = (row.funding_8h.toFixed(2) + '%').padEnd(8);
                 const fd1 = (row.funding_1d.toFixed(2) + '%').padEnd(8);
                 const fd3 = (row.funding_3d.toFixed(2) + '%').padEnd(8);
                 const fd7 = (row.funding_7d.toFixed(2) + '%').padEnd(8);
                 const fd14 = (row.funding_14d.toFixed(2) + '%').padEnd(8);
-                table += `${coin}${notional}${exchange}${side}${fd1}${fd3}${fd7}${fd14}\n`;
+                table += `${coin}${notional}${exchange}${side}${fd8h}${fd1}${fd3}${fd7}${fd14}\n`;
             });
         } else {
             table += 'Нет нехеджированных позиций для анализа.\n';

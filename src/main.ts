@@ -23,6 +23,8 @@ import { TotalFundingsService } from './modules/totalFundings/totalFundings.serv
 import { BpService } from './modules/bp/bp.service';
 import { AutoTradeService } from './modules/auto_trade/auto_trade.service';
 import { AutoCloseService } from './modules/auto_close/auto_close.service';
+import { TestBpService } from './modules/test_bp/test_bp.service';
+import { FundingApiService } from './modules/funding_api/funding_api.service';
 import { UserService } from './modules/users/users.service';
 import { SettingsService } from './modules/settings/settings.service';
 
@@ -35,6 +37,8 @@ import { AutoTradeController } from './modules/auto_trade/auto_trade.controller'
 import { ExtendedTradeController } from './modules/extended/extended.trade.controller';
 import { LighterController } from './modules/lighter/lighter.controller';
 import { AutoCloseController } from './modules/auto_close/auto_close.controller';
+import { TestBpController } from './modules/test_bp/test_bp.controller';
+import { FundingApiController } from './modules/funding_api/funding_api.controller';
 import { UsersController } from './modules/users/users.controller';
 import { SettingsController } from './modules/settings/settings.controller';
 
@@ -66,10 +70,15 @@ process.on('unhandledRejection', (reason, promise) => {
 
 // ============================================================
 
-// --- Keyboard ---
+// --- Keyboards ---
 const mainMenuKeyboard = Markup.keyboard([
+    ['Trade-BOT', 'Fundings']
+]).resize();
+
+const tradeBotKeyboard = Markup.keyboard([
     ['Плечи', 'Позиции', 'Фандинги', 'bp', 'OPEN POS'],
-    ['Ручная проверка', 'Автоматическая проверка', 'Настройки']
+    ['тест_бп', 'Ручная проверка', 'Автоматическая проверка'],
+    ['Настройки', '🔙 Назад в меню']
 ]).resize();
 
 const userState = new Map<number, string>();
@@ -115,6 +124,10 @@ async function start() {
         lighterService
     );
 
+    const testBpService = new TestBpService(
+        lighterService
+    );
+
     const autoTradeService = new AutoTradeService(
         binanceService,
         hyperliquidService,
@@ -131,6 +144,8 @@ async function start() {
         settingsService
     );
 
+    const fundingApiService = new FundingApiService();
+
     // ============================================================
     // 2. ИНИЦИАЛИЗАЦИЯ КОНТРОЛЛЕРОВ (СЛОЙ ВЗАИМОДЕЙСТВИЯ)
     // ============================================================
@@ -143,6 +158,8 @@ async function start() {
     const extendedTradeController = new ExtendedTradeController(extendedService);
     const lighterController = new LighterController(lighterService);
     const autoCloseController = new AutoCloseController(autoCloseService);
+    const testBpController = new TestBpController(testBpService);
+    const fundingApiController = new FundingApiController(fundingApiService);
     const usersController = new UsersController(userService);
     const settingsController = new SettingsController(settingsService, userState);
 
@@ -177,6 +194,14 @@ async function start() {
         if (data && data.startsWith('settings_')) {
             return settingsController.handleCallback(ctx);
         }
+
+        if (data && data.startsWith('testbp_')) {
+            return testBpController.handleCallbackQuery(ctx);
+        }
+
+        if (data && data.startsWith('fapi_')) {
+            return fundingApiController.handleCallbackQuery(ctx);
+        }
     });
 
     // Обработка текста
@@ -198,11 +223,29 @@ async function start() {
             }
         }
         const mainMenuCommands = [
+            'Trade-BOT', 'Fundings'
+        ];
+
+        const tradeBotCommands = [
             'Плечи', 'Позиции', 'Фандинги', 'bp', 'OPEN POS',
-            'Ручная проверка', 'Автоматическая проверка', 'Настройки'
+            'тест_бп', 'Ручная проверка', 'Автоматическая проверка', 'Настройки'
+        ];
+
+        const fundingApiCommands = [
+            'Фандинг монеты', 'Лучшие монеты', 'Обновить список монет', 'Обновить БД'
         ];
 
         if (mainMenuCommands.includes(text)) {
+            userState.delete(userId);
+            if (text === 'Trade-BOT') {
+                return ctx.reply('Меню торгового бота:', tradeBotKeyboard);
+            }
+            if (text === 'Fundings') {
+                return fundingApiController.handleFundingMenu(ctx);
+            }
+        }
+
+        if (tradeBotCommands.includes(text)) {
             userState.delete(userId);
 
             switch (text) {
@@ -216,12 +259,29 @@ async function start() {
                     return bpController.handleBpCommand(ctx);
                 case 'OPEN POS':
                     return autoTradeController.handleOpenPosCommand(ctx);
+                case 'тест_бп':
+                    return testBpController.handleTestBpCommand(ctx);
                 case 'Ручная проверка':
                     return autoCloseController.handleManualCheck(ctx);
                 case 'Автоматическая проверка':
                     return autoCloseController.handleToggleMonitor(ctx);
                 case 'Настройки':
                     return settingsController.onSettingsCommand(ctx);
+            }
+            return;
+        }
+
+        if (fundingApiCommands.includes(text)) {
+            userState.delete(userId);
+            switch (text) {
+                case 'Фандинг монеты':
+                    return fundingApiController.handleCoinAnalysisStart(ctx);
+                case 'Лучшие монеты':
+                    return fundingApiController.handleBestOpportunities(ctx);
+                case 'Обновить список монет':
+                    return fundingApiController.handleSyncCoins(ctx);
+                case 'Обновить БД':
+                    return fundingApiController.handleSyncFull(ctx);
             }
             return;
         }
@@ -236,6 +296,16 @@ async function start() {
         // BP Flow
         if (bpController.isUserInBpFlow(userId)) {
             return bpController.handleCoinInput(ctx);
+        }
+
+        // Test BP Flow
+        if (testBpController.isUserInFlow(userId)) {
+            return testBpController.handleTextInput(ctx);
+        }
+
+        // Funding API Flow
+        if (fundingApiController.isUserInFlow(userId)) {
+            return fundingApiController.handleTextInput(ctx);
         }
 
         // --- ЛОГИКА 3: ДРУГИЕ СОСТОЯНИЯ ---
@@ -261,6 +331,7 @@ async function start() {
     const gracefulShutdown = (signal: string) => {
         console.log(`\n[Graceful Shutdown] Получен сигнал ${signal}. Завершение...`);
         autoCloseService.stopAll();
+        testBpService.stopAll();
         // Можно добавить: bpService.stop(), autoTradeService.stopSession()...
         bot.stop(signal);
         console.log('[Graceful Shutdown] Готово.');

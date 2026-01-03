@@ -196,6 +196,7 @@ export interface IFundingResultRow {
     coin: string;
     notional: number;
     exchanges: string;
+    funding_8h: number;
     funding_1d: number;
     funding_3d: number;
     funding_7d: number;
@@ -207,6 +208,7 @@ export interface IUnhedgedFundingResultRow {
     notional: number;
     exchange: string;
     side: 'LONG' | 'SHORT';
+    funding_8h: number;
     funding_1d: number;
     funding_3d: number;
     funding_7d: number;
