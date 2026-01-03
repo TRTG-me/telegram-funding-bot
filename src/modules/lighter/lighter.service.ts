@@ -103,6 +103,11 @@ export class LighterService {
     public async getMarketId(symbol: string, userId?: number): Promise<number | null> {
         const ctx = await this.getContext(userId);
         if (!ctx.client) return null;
+
+        if (!ctx.client.isInitialized) {
+            await ctx.client.init();
+        }
+
         return ctx.client.getMarketId(symbol);
     }
 
