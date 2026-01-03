@@ -1,14 +1,19 @@
 import { ExchangeName } from '../bp/bp.types';
 
-export interface TestBpResult {
+export interface PayBackResult {
     coin: string;
     longExchange: ExchangeName;
     shortExchange: ExchangeName;
     averageBp: number;
     sampleCount: number;
+    totalCostBp: number;
+    dailyReturnBp: number;
+    paybackDays: number;
+    apr1d: number;
+    apr3d: number;
 }
 
-export interface TestBpState {
+export interface PayBackState {
     step: 'awaiting_coin' | 'awaiting_long' | 'awaiting_short' | 'calculating';
     coin?: string;
     longExchange?: ExchangeName;

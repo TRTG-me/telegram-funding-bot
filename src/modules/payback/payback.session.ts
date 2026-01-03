@@ -5,9 +5,10 @@ import { ParadexTickerService } from '../paradex/websocket/paradex.ticker.servic
 import { ExtendedTickerService } from '../extended/websocket/extended.ticker.service';
 import { LighterTickerService } from '../lighter/websocket/lighter.ticker.service';
 import { LighterService } from '../lighter/lighter.service';
+import { FundingApiService } from '../funding_api/funding_api.service';
 import * as Helpers from '../auto_trade/auto_trade.helpers';
 import { ExchangeName } from '../bp/bp.types';
-import { TestBpResult } from './test_bp.types';
+import { PayBackResult } from './payback.types';
 
 type TickerInstance =
     | BinanceTickerService
@@ -16,8 +17,16 @@ type TickerInstance =
     | ExtendedTickerService
     | LighterTickerService;
 
-export class TestBpSession {
-    private readonly logger = new Logger(TestBpSession.name);
+const COMMISSIONS: Record<ExchangeName, number> = {
+    'Paradex': 0,
+    'Hyperliquid': 4.32,
+    'Binance': 4.5,
+    'Lighter': 2,
+    'Extended': 2.25
+};
+
+export class PayBackSession {
+    private readonly logger = new Logger(PayBackSession.name);
 
     private activeLongService: TickerInstance | null = null;
     private activeShortService: TickerInstance | null = null;
@@ -32,7 +41,8 @@ export class TestBpSession {
 
     constructor(
         public readonly userId: number,
-        private readonly lighterDataService: LighterService
+        private readonly lighterDataService: LighterService,
+        private readonly fundingApiService: FundingApiService
     ) { }
 
     private createTickerInstance(exchange: ExchangeName): TickerInstance {
@@ -49,7 +59,7 @@ export class TestBpSession {
     private async formatSymbolFor(exchange: ExchangeName, coin: string): Promise<string> {
         if (exchange === 'Lighter') {
             const symbol = Helpers.getUnifiedSymbol(exchange, coin, true);
-            const id = this.lighterDataService.getMarketId(symbol);
+            const id = await this.lighterDataService.getMarketId(symbol, this.userId);
             if (id !== null) return id.toString();
             throw new Error(`Market ${symbol} not found on Lighter.`);
         }
@@ -60,7 +70,7 @@ export class TestBpSession {
         coin: string,
         longExchange: ExchangeName,
         shortExchange: ExchangeName,
-        onFinished: (result: TestBpResult | null) => void
+        onFinished: (result: PayBackResult | null) => void
     ): Promise<void> {
         this.isStopping = false;
 
@@ -75,7 +85,7 @@ export class TestBpSession {
             this.activeLongService = this.createTickerInstance(longExchange);
             this.activeShortService = this.createTickerInstance(shortExchange);
 
-            this.logger.log(`[User ${this.userId}] Starting Test BP: ${coin} ${longExchange} vs ${shortExchange}`);
+            this.logger.log(`[User ${this.userId}] Starting Payback Test: ${coin} ${longExchange} vs ${shortExchange}`);
 
             const startSafe = async (service: TickerInstance, symbol: string, isLong: boolean) => {
                 try {
@@ -110,27 +120,65 @@ export class TestBpSession {
             }, 1000);
 
             // Finish after 60s
-            this.timerTimeout = setTimeout(() => {
+            this.timerTimeout = setTimeout(async () => {
                 if (this.isStopping) return;
 
                 const count = this.bpSamples.length;
-                if (count < 5) { // Minimum samples to consider it valid
+                if (count < 5) {
                     onFinished(null);
                 } else {
                     const sum = this.bpSamples.reduce((a, b) => a + b, 0);
-                    onFinished({
-                        coin,
-                        longExchange,
-                        shortExchange,
-                        averageBp: sum / count,
-                        sampleCount: count
-                    });
+                    const averageBp = sum / count;
+
+                    try {
+                        const fundingInfo = await this.fundingApiService.getCoinAnalysis(coin, [longExchange, shortExchange]);
+                        const comp = fundingInfo.comparisons.find(c =>
+                            c.pair.includes(longExchange) && c.pair.includes(shortExchange)
+                        );
+
+                        let apr1d = 0;
+                        let apr3d = 0;
+
+                        if (comp) {
+                            const isLongEx1 = comp.pair.startsWith(longExchange);
+                            const res1d = comp.results.find(r => r.period === '1d');
+                            const res3d = comp.results.find(r => r.period === '3d');
+
+                            if (res1d) apr1d = isLongEx1 ? -res1d.diff : res1d.diff;
+                            if (res3d) apr3d = isLongEx1 ? -res3d.diff : res3d.diff;
+                        }
+
+                        const totalCostBp = (COMMISSIONS[longExchange] || 0) + (COMMISSIONS[shortExchange] || 0) - averageBp;
+                        const minApr = Math.min(apr1d, apr3d);
+                        const dailyReturnBp = minApr / 3.65;
+                        let paybackDays = dailyReturnBp > 0 ? totalCostBp / dailyReturnBp : 999;
+                        if (totalCostBp <= 0 && dailyReturnBp > 0) paybackDays = 0;
+
+                        onFinished({
+                            coin,
+                            longExchange,
+                            shortExchange,
+                            averageBp,
+                            sampleCount: count,
+                            totalCostBp,
+                            dailyReturnBp,
+                            paybackDays,
+                            apr1d,
+                            apr3d
+                        });
+                    } catch (err) {
+                        this.logger.error(`Failed to fetch funding for payback calculation: ${err}`);
+                        onFinished({
+                            coin, longExchange, shortExchange, averageBp,
+                            sampleCount: count, totalCostBp: 0, dailyReturnBp: 0, paybackDays: 0, apr1d: 0, apr3d: 0
+                        });
+                    }
                 }
                 this.stop();
             }, 60000);
 
         } catch (error: any) {
-            this.logger.error(`[User ${this.userId}] Test BP Error: ${error.message}`);
+            this.logger.error(`[User ${this.userId}] Payback Session Error: ${error.message}`);
             this.stop();
             throw error;
         }
@@ -152,7 +200,7 @@ export class TestBpSession {
         try {
             if (this.activeLongService) this.activeLongService.stop();
             if (this.activeShortService) this.activeShortService.stop();
-        } catch (e) { console.error(e); }
+        } catch (e) { }
 
         this.activeLongService = null;
         this.activeShortService = null;
