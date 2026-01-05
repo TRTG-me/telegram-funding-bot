@@ -295,6 +295,27 @@ export class ParadexService {
         }
     }
 
+    public async getLiveFundingRate(coin: string): Promise<number> {
+        try {
+            const market = coin.endsWith('-USD-PERP') ? coin : `${coin}-USD-PERP`;
+            const [marketRes, summaryRes] = await Promise.all([
+                axios.get(`${this.apiUrl}/markets?market=${market}`, { headers: BROWSER_HEADERS, timeout: HTTP_TIMEOUT }),
+                axios.get(`${this.apiUrl}/markets/summary?market=${market}`, { headers: BROWSER_HEADERS, timeout: HTTP_TIMEOUT })
+            ]);
+
+            const marketDetails = marketRes.data.results[0];
+            const marketSummary = summaryRes.data.results[0];
+            if (!marketSummary) return 0;
+
+            let rate = parseFloat(marketSummary.funding_rate || '0');
+            const interval = marketDetails?.funding_period_hours || 8;
+
+            return (rate / interval) * 24 * 365 * 100;
+        } catch (e) {
+            return 0;
+        }
+    }
+
     public async calculateLeverage(userId?: number): Promise<IExchangeData> {
         try {
             const ctx = await this.getContext(userId);

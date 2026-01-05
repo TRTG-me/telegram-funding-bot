@@ -275,6 +275,20 @@ export class HyperliquidService {
         return allPositions.find(p => p.coin === cleanSymbol);
     }
 
+    public async getLiveFundingRate(coin: string): Promise<number> {
+        try {
+            const body = { type: 'metaAndAssetCtxs' };
+            const response = await axios.post(this.API_URL, body, { timeout: HTTP_TIMEOUT });
+            const [meta, contexts] = response.data;
+            const index = meta.universe.findIndex((asset: any) => asset.name === coin);
+            if (index === -1) return 0;
+            const hourlyRate = parseFloat(contexts[index].funding);
+            return hourlyRate * 24 * 365 * 100;
+        } catch (e) {
+            return 0;
+        }
+    }
+
     public async calculateLeverage(userId?: number): Promise<IExchangeData> {
         try {
             const { mainState, secondaryState } = await this._getCoreAccountData(userId);

@@ -183,6 +183,20 @@ export class ExtendedService {
         return allPositions.find(p => p.coin === cleanSymbol);
     }
 
+    public async getLiveFundingRate(coin: string): Promise<number> {
+        try {
+            const market = coin.endsWith('-USD') ? coin : `${coin}-USD`;
+            const statsResponse = await axios.get<IExtendedMarketStatsResponse>(
+                `${this.apiUrl}/info/markets/${market}/stats`,
+                { timeout: CONFIG.HTTP_TIMEOUT }
+            );
+            const fundingRateData = statsResponse.data?.data?.fundingRate || '0';
+            return parseFloat(fundingRateData) * 24 * 365 * 100;
+        } catch (e) {
+            return 0;
+        }
+    }
+
     public async calculateLeverage(userId?: number): Promise<IExchangeData> {
         try {
             const ctx = await this.getContext(userId);

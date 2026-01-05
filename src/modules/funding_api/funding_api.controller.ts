@@ -6,11 +6,11 @@ export class FundingApiController {
     private userState = new Map<number, FundingApiState & { scanSelected?: string[] }>();
 
     private readonly exchangeIcons: Record<string, string> = {
-        'Binance': '🔶',
-        'Hyperliquid': '🟦',
-        'Paradex': '🟩',
-        'Lighter': '🟪',
-        'Extended': '🟧'
+        'Binance': '',
+        'Hyperliquid': '',
+        'Paradex': '',
+        'Lighter': '',
+        'Extended': ''
     };
 
     constructor(private readonly fundingApiService: FundingApiService) { }
@@ -26,8 +26,8 @@ export class FundingApiController {
 
     public async handleFundingMenu(ctx: Context): Promise<void> {
         const keyboard = Markup.keyboard([
-            ['🔍 Фандинг монеты', '🏆 Лучшие монеты'],
-            ['🔄 Обновить список монет', '🚀 Обновить БД'],
+            ['Фандинги Поз', 'Окупаемость'],
+            ['🔍 Фандинг монеты', '🏆 Лучшие монеты', '🔄 Обновить список монет', '🚀 Обновить БД'],
             ['🔙 Назад в меню']
         ]).resize();
 
@@ -49,7 +49,7 @@ export class FundingApiController {
         const all = ['Binance', 'Hyperliquid', 'Paradex', 'Lighter', 'Extended'];
         const available = all.filter(ex => !selected.includes(ex));
 
-        const buttons = available.map(ex => Markup.button.callback(`${this.exchangeIcons[ex] || ''} ${ex}`, `fapi_scan_toggle_${ex}`));
+        const buttons = available.map(ex => Markup.button.callback(ex, `fapi_scan_toggle_${ex}`));
         const rows: any[][] = [];
         if (buttons.length > 0) {
             for (let i = 0; i < buttons.length; i += 5) {
@@ -79,7 +79,7 @@ export class FundingApiController {
             table += `│${'COIN (P)'.padEnd(c0)}│${'8h'.padStart(cW)}│${'1d'.padStart(cW)}│${'3d'.padStart(cW)}│${'7d'.padStart(cW)}│${'14d'.padStart(cW)}│\n`;
             table += `├${'─'.repeat(c0)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┤\n`;
 
-            best.slice(0, 25).forEach(item => {
+            best.slice(0, 30).forEach(item => {
                 const label = `${item.coin} (${item.pair})`.substring(0, c0).padEnd(c0);
                 const diffs = item.diffs.map(v => v.toFixed(0).padStart(cW)).join('│');
                 table += `│${label}│${diffs}│\n`;
@@ -140,7 +140,7 @@ export class FundingApiController {
     private getExchangesKeyboard(coin: string, available: string[], selected: string[]) {
         const buttons = available
             .filter(ex => !selected.includes(ex))
-            .map(ex => Markup.button.callback(`${this.exchangeIcons[ex] || ''} ${ex}`, `fapi_sel_${ex}`));
+            .map(ex => Markup.button.callback(ex, `fapi_sel_${ex}`));
 
         const rows: any[][] = [];
         if (buttons.length > 0) {
@@ -248,8 +248,15 @@ export class FundingApiController {
                 await ctx.reply(`📭 Монета ${coin} представлена только на одной бирже или недостаточно данных.`);
             }
 
+            // Fetch live APRs
+            const liveAPRs = new Map<string, number>();
+            await Promise.all(selected.map(async (ex) => {
+                const apr = await this.fundingApiService.getLiveFundingAPR(ex, coin);
+                liveAPRs.set(ex, apr);
+            }));
+
             for (const [ex1, ex2] of pairs) {
-                const table = this.renderSingleComparisonTable(coin, data.comparisons, ex1, ex2);
+                const table = this.renderSingleComparisonTable(coin, data.comparisons, ex1, ex2, liveAPRs);
                 if (table) {
                     await ctx.replyWithHTML(table);
                     await new Promise(r => setTimeout(r, 200));
@@ -270,29 +277,33 @@ export class FundingApiController {
         }
     }
 
-    private renderSingleComparisonTable(coin: string, comparisons: any[], ex1: string, ex2: string): string | null {
+    private renderSingleComparisonTable(coin: string, comparisons: any[], ex1: string, ex2: string, liveAPRs: Map<string, number>): string | null {
         const comp = comparisons.find(c => c.pair.includes(ex1) && c.pair.includes(ex2));
         if (!comp) return null;
         const isEx1FirstValue = comp.pair.startsWith(ex1);
-        const c0 = 8; const cW = 6;
+        const c0 = 8; const cW = 5;
         const formatVal = (val: number) => {
-            if (val === null || val === undefined || isNaN(val)) return '  NaN '.padStart(cW);
+            if (val === null || val === undefined || isNaN(val)) return '  NaN'.padStart(cW);
             const s = val.toFixed(1); return (s.length > cW ? val.toFixed(0) : s).padStart(cW);
         };
-        const top = `┌${'─'.repeat(c0)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┐\n`;
-        const line = `├${'─'.repeat(c0)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┤\n`;
-        const bottom = `└${'─'.repeat(c0)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┘\n`;
+        const live1 = liveAPRs.get(ex1) || 0;
+        const live2 = liveAPRs.get(ex2) || 0;
+        const liveDiff = live1 - live2;
+
+        const top = `┌${'─'.repeat(c0)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┐\n`;
+        const line = `├${'─'.repeat(c0)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┤\n`;
+        const bottom = `└${'─'.repeat(c0)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┘\n`;
 
         const label1 = `${this.exchangeIcons[ex1] || ''}${ex1.substring(0, c0 - 2)}`.padEnd(c0);
         const label2 = `${this.exchangeIcons[ex2] || ''}${ex2.substring(0, c0 - 2)}`.padEnd(c0);
 
-        let table = `📊 <b>${coin}</b>: ${this.exchangeIcons[ex1] || ''}${ex1} 🆚 ${this.exchangeIcons[ex2] || ''}${ex2}\n<pre><code>${top}│${'T-APR'.padEnd(c0)}│${'8h'.padStart(cW)}│${'1d'.padStart(cW)}│${'3d'.padStart(cW)}│${'7d'.padStart(cW)}│${'14d'.padStart(cW)}│\n${line}`;
+        let table = `📊 <b>${coin}</b>: ${this.exchangeIcons[ex1] || ''}${ex1} 🆚 ${this.exchangeIcons[ex2] || ''}${ex2}\n<pre><code>${top}│${'T-APR'.padEnd(c0)}│${'8h'.padStart(cW)}│${'1d'.padStart(cW)}│${'3d'.padStart(cW)}│${'7d'.padStart(cW)}│${'14d'.padStart(cW)}│${'cur'.padStart(cW)}│\n${line}`;
         const aprs1 = comp.results.map((r: any) => isEx1FirstValue ? r.apr1 : r.apr2);
         const aprs2 = comp.results.map((r: any) => isEx1FirstValue ? r.apr2 : r.apr1);
         const diffs = comp.results.map((r: any) => isEx1FirstValue ? r.diff : -r.diff);
 
-        table += `│${label1}│${aprs1.map(formatVal).join('│')}│\n`;
-        table += `│${label2}│${aprs2.map(formatVal).join('│')}│\n${line}│${'DIFF'.padEnd(c0)}│${diffs.map(formatVal).join('│')}│\n${bottom}</code></pre>`;
+        table += `│${label1}│${aprs1.map(formatVal).join('│')}│${formatVal(live1)}│\n`;
+        table += `│${label2}│${aprs2.map(formatVal).join('│')}│${formatVal(live2)}│\n${line}│${'DIFF'.padEnd(c0)}│${diffs.map(formatVal).join('│')}│${formatVal(liveDiff)}│\n${bottom}</code></pre>`;
         return table;
     }
 
@@ -303,24 +314,41 @@ export class FundingApiController {
             await ctx.reply('🚀 <b>Запуск глобального обновления БД...</b>\nОпрашиваю 5 бирж параллельно.', { parse_mode: 'HTML' });
             const data = await this.fundingApiService.syncFull();
 
+            if (data.success === false) {
+                await ctx.reply(`⚠️ <b>Обновление отклонено:</b>\n${data.error || 'База уже обновляется другим пользователем.'}`, { parse_mode: 'HTML' });
+                return;
+            }
+
             let msg = `📊 <b>Отчет об обновлении:</b>\n\n`;
             if (data.report && Array.isArray(data.report)) {
                 data.report.forEach((r: any) => {
                     const icon = this.exchangeIcons[r.label] || '';
                     if (r.success) {
-                        msg += `✅ ${icon} <b>${r.label}</b>: ${r.totalSaved} зап. за ${r.duration}с\n`;
+                        msg += `✅ ${icon} <b>${r.label}</b>: ${r.totalSaved || 0} зап. за ${r.duration || 0}с\n`;
                     } else {
                         msg += `❌ ${icon} <b>${r.label}</b>: Ошибка\n`;
                     }
                 });
+            } else {
+                msg += `ℹ️ Данные отчета не получены.\n`;
             }
-            msg += `\n🏁 <b>Всего затрачено:</b> ${data.totalDuration} сек.`;
+
+            if (data.totalDuration) {
+                msg += `\n🏁 <b>Всего затрачено:</b> ${data.totalDuration} сек.`;
+            } else {
+                msg += `\n🏁 Обновление завершено.`;
+            }
+
             await ctx.replyWithHTML(msg);
+
         } catch (err: any) {
-            await ctx.reply(`❌ Ошибка обновления БД: ${err.message}`);
+            if (err.response?.status === 409) {
+                await ctx.reply(`⚠️ <b>Обновление уже запущено</b> другим пользователем. Пожалуйста, подождите завершения.`, { parse_mode: 'HTML' });
+            } else {
+                await ctx.reply(`❌ Ошибка обновления БД: ${err.message}`);
+            }
         }
     }
-
     public async handleSyncCoins(ctx: Context): Promise<void> {
         try {
             const data = await this.fundingApiService.syncCoins();

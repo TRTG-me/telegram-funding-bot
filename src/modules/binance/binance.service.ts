@@ -259,6 +259,33 @@ export class BinanceService {
         }
     }
 
+    public async getLiveFundingRate(coin: string): Promise<number> {
+        try {
+            const base = coin.replace(/USDT|USDC$/, '');
+            const symbol = `${base}USDT`;
+            const premUrl = this.isTestnet
+                ? `https://testnet.binancefuture.com/fapi/v1/premiumIndex?symbol=${symbol}`
+                : `https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${symbol}`;
+
+            const fundingUrl = 'https://fapi.binance.com/fapi/v1/fundingInfo';
+            const [premRes, fundingInfoRes] = await Promise.all([
+                axios.get(premUrl, { timeout: 5000 }),
+                axios.get(fundingUrl, { timeout: 5000 }).catch(() => ({ data: [] }))
+            ]);
+
+            const lastFundingRate = parseFloat(premRes.data.lastFundingRate || '0');
+            let interval = 8;
+            if (Array.isArray(fundingInfoRes.data)) {
+                const info = fundingInfoRes.data.find((i: any) => i.symbol === symbol);
+                if (info) interval = info.fundingIntervalHours || 8;
+            }
+
+            return lastFundingRate * (24 / interval) * 365 * 100;
+        } catch (e) {
+            return 0;
+        }
+    }
+
     // 4) Создание ордера
     public async placeBinOrder(
         symbol: string,

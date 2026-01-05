@@ -28,7 +28,7 @@ export class PayBackController {
 
         const keyboard = Markup.inlineKeyboard([
             [Markup.button.callback('🪙 Одна монета', 'payback_mode_single')],
-            [Markup.button.callback('📊 Deep Scan (TOP-25 Mo монет)', 'payback_mode_deep')]
+            [Markup.button.callback('📊 Deep Scan (TOP Moнет)', 'payback_mode_deep')]
         ]);
 
         await ctx.reply('🔍 <b>Окупаемость входа</b>\nВыберите режим расчета:', { parse_mode: 'HTML', ...keyboard });
@@ -72,7 +72,7 @@ export class PayBackController {
         }
 
         if (data === 'payback_mode_deep') {
-            await ctx.editMessageText('🚀 <b>Запускаю Deep Scan (Глубокий анализ ТОП-25)</b>\n\n1. Собираю лучшие пары из API...\n2. Открываю WebSocket соединения...\n3. Считаю реальный БП 60 секунд.\n\n⏳ Пожалуйста, подождите...', { parse_mode: 'HTML' });
+            await ctx.editMessageText('🚀 <b>Запускаю Deep Scan (Глубокий анализ)</b>\n\n1. Собираю лучшие пары из API...\n2. Открываю WebSocket соединения...\n3. Считаю реальный БП 60 секунд.\n\n⏳ Пожалуйста, подождите...', { parse_mode: 'HTML' });
 
             try {
                 await this.payBackService.startDeepScan(userId, async (result) => {
