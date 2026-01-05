@@ -76,8 +76,8 @@ const mainMenuKeyboard = Markup.keyboard([
 ]).resize();
 
 const tradeBotKeyboard = Markup.keyboard([
-    ['Плечи', 'Позиции', 'Фандинги', 'bp', 'OPEN POS'],
-    ['Окупаемость', 'Ручная проверка', 'Автоматическая проверка'],
+    ['Плечи', 'Позиции', 'bp', 'OPEN POS'],
+    ['Ручная проверка', 'Автоматическая проверка'],
     ['Настройки', '🔙 Назад в меню']
 ]).resize();
 
@@ -141,7 +141,9 @@ async function start() {
         settingsService
     );
 
-    const fundingApiService = new FundingApiService();
+    const fundingApiService = new FundingApiService(
+        binanceService, hyperliquidService, paradexService, lighterService, extendedService
+    );
 
     const payBackService = new PayBackService(
         lighterService,
@@ -229,11 +231,12 @@ async function start() {
         ];
 
         const tradeBotCommands = [
-            'Плечи', 'Позиции', 'Фандинги', 'bp', 'OPEN POS',
-            'Окупаемость', 'Ручная проверка', 'Автоматическая проверка', 'Настройки'
+            'Плечи', 'Позиции', 'bp', 'OPEN POS',
+            'Ручная проверка', 'Автоматическая проверка', 'Настройки'
         ];
 
         const fundingApiCommands = [
+            'Фандинги Поз', 'Окупаемость',
             '🔍 Фандинг монеты', '🏆 Лучшие монеты', '🔄 Обновить список монет', '🚀 Обновить БД'
         ];
 
@@ -255,14 +258,10 @@ async function start() {
                     return summaryController.sendSummaryTable(ctx);
                 case 'Позиции':
                     return totalPositionsController.displayAggregatedPositions(ctx);
-                case 'Фандинги':
-                    return totalFundingsController.displayHistoricalFunding(ctx);
                 case 'bp':
                     return bpController.handleBpCommand(ctx);
                 case 'OPEN POS':
                     return autoTradeController.handleOpenPosCommand(ctx);
-                case 'Окупаемость':
-                    return payBackController.handlePayBackCommand(ctx);
                 case 'Ручная проверка':
                     return autoCloseController.handleManualCheck(ctx);
                 case 'Автоматическая проверка':
@@ -276,6 +275,10 @@ async function start() {
         if (fundingApiCommands.includes(text)) {
             userState.delete(userId);
             switch (text) {
+                case 'Фандинги Поз':
+                    return totalFundingsController.displayHistoricalFunding(ctx);
+                case 'Окупаемость':
+                    return payBackController.handlePayBackCommand(ctx);
                 case '🔍 Фандинг монеты':
                     return fundingApiController.handleCoinAnalysisStart(ctx);
                 case '🏆 Лучшие монеты':
@@ -332,6 +335,12 @@ async function start() {
 
     const gracefulShutdown = (signal: string) => {
         console.log(`\n[Graceful Shutdown] Получен сигнал ${signal}. Завершение...`);
+
+        // Принудительный выход через 5 сек, если зависнет
+        setTimeout(() => {
+            console.log('[Graceful Shutdown] Forced exit after 5s');
+            process.exit(0);
+        }, 5000);
         autoCloseService.stopAll();
         payBackService.stopAll();
         bot.stop(signal);
@@ -341,6 +350,7 @@ async function start() {
 
     process.on('SIGINT', () => gracefulShutdown('SIGINT'));
     process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGUSR2', () => gracefulShutdown('SIGUSR2')); // Для nodemon
 }
 
 start();

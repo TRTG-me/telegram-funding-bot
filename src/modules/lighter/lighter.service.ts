@@ -197,6 +197,21 @@ export class LighterService {
 
     // --- Trading Methods ---
 
+    public async getLiveFundingRate(coin: string): Promise<number> {
+        try {
+            const fundingResponse = await axios.get<IFundingRatesResponseLighter>(`${this.API_URL}/funding-rates`, { timeout: HTTP_TIMEOUT });
+            const fundingRates = fundingResponse?.data?.funding_rates;
+            if (!Array.isArray(fundingRates)) return 0;
+
+            const rate = fundingRates.find(r => r.exchange === 'lighter' && (r.symbol === coin || r.symbol.includes(coin)));
+            if (!rate) return 0;
+
+            return rate.rate * 3 * 365 * 100; // Lighter uses 8h segments
+        } catch (e) {
+            return 0;
+        }
+    }
+
     public async calculateLeverage(userId?: number): Promise<IExchangeData> {
         try {
             const ctx = await this.getContext(userId);

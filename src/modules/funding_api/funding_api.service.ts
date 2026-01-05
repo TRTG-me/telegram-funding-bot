@@ -4,18 +4,45 @@ import { ChartJSNodeCanvas } from 'chartjs-node-canvas';
 import { ChartConfiguration } from 'chart.js';
 import { BestOpportunity, CoinAnalysisResponse } from './funding_api.types';
 
+import { BinanceService } from '../binance/binance.service';
+import { HyperliquidService } from '../hyperliquid/hyperliquid.service';
+import { ParadexService } from '../paradex/paradex.service';
+import { LighterService } from '../lighter/lighter.service';
+import { ExtendedService } from '../extended/extended.service';
+
 @Injectable()
 export class FundingApiService {
     private readonly logger = new Logger(FundingApiService.name);
     private readonly API_BASE = 'http://localhost:3000/api';
     private chartJSNodeCanvas: ChartJSNodeCanvas;
 
-    constructor() {
+    constructor(
+        private readonly binanceService: BinanceService,
+        private readonly hlService: HyperliquidService,
+        private readonly paradexService: ParadexService,
+        private readonly lighterService: LighterService,
+        private readonly extendedService: ExtendedService,
+    ) {
         this.chartJSNodeCanvas = new ChartJSNodeCanvas({
             width: 1000,
             height: 500,
             backgroundColour: 'white'
         });
+    }
+
+    public async getLiveFundingAPR(exchange: string, coin: string): Promise<number> {
+        try {
+            switch (exchange) {
+                case 'Binance': return await this.binanceService.getLiveFundingRate(coin);
+                case 'Hyperliquid': return await this.hlService.getLiveFundingRate(coin);
+                case 'Paradex': return await this.paradexService.getLiveFundingRate(coin);
+                case 'Lighter': return await this.lighterService.getLiveFundingRate(coin);
+                case 'Extended': return await this.extendedService.getLiveFundingRate(coin);
+                default: return 0;
+            }
+        } catch (e) {
+            return 0;
+        }
     }
 
     async getCoins(): Promise<string[]> {

@@ -232,9 +232,16 @@ export class ParadexTickerService {
         }
 
         if (this.ws) {
-            this.ws.removeAllListeners();
-            this.ws.close(1000);
-            this.ws = null;
+            try {
+                this.ws.removeAllListeners();
+                if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+                    this.ws.terminate();
+                }
+            } catch (e) {
+                // Ignore close errors
+            } finally {
+                this.ws = null;
+            }
         }
     }
 }

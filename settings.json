@@ -1,15 +1,15 @@
 {
   "leverage": {
     "green": {
-      "value": 5,
+      "value": 4.7,
       "emoji": "✅"
     },
     "yellow": {
-      "value": 6,
+      "value": 5,
       "emoji": "☢️"
     },
     "red": {
-      "value": 7,
+      "value": 5.3,
       "emoji": "🛑"
     }
   },

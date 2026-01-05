@@ -199,6 +199,8 @@ export class PayBackSession {
 
         try {
             if (this.activeLongService) this.activeLongService.stop();
+        } catch (e) { }
+        try {
             if (this.activeShortService) this.activeShortService.stop();
         } catch (e) { }
 
