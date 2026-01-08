@@ -101,7 +101,7 @@ export class PayBackService {
     }
 
     private formatDeepScanTable(originalItems: any[], results: (PayBackResult | null)[]): string {
-        const c0 = 12; // COIN (P)
+        const c0 = 14; // COIN (P)
         const cW = 5;  // DATA
         const cP = 6;  // P.DAY
 

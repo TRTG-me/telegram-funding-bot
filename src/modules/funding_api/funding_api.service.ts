@@ -9,6 +9,7 @@ import { HyperliquidService } from '../hyperliquid/hyperliquid.service';
 import { ParadexService } from '../paradex/paradex.service';
 import { LighterService } from '../lighter/lighter.service';
 import { ExtendedService } from '../extended/extended.service';
+import * as Helpers from '../auto_trade/auto_trade.helpers';
 
 @Injectable()
 export class FundingApiService {
@@ -32,12 +33,13 @@ export class FundingApiService {
 
     public async getLiveFundingAPR(exchange: string, coin: string): Promise<number> {
         try {
+            const unifiedSymbol = Helpers.getUnifiedSymbol(exchange as any, coin, true);
             switch (exchange) {
-                case 'Binance': return await this.binanceService.getLiveFundingRate(coin);
-                case 'Hyperliquid': return await this.hlService.getLiveFundingRate(coin);
-                case 'Paradex': return await this.paradexService.getLiveFundingRate(coin);
-                case 'Lighter': return await this.lighterService.getLiveFundingRate(coin);
-                case 'Extended': return await this.extendedService.getLiveFundingRate(coin);
+                case 'Binance': return await this.binanceService.getLiveFundingRate(unifiedSymbol);
+                case 'Hyperliquid': return await this.hlService.getLiveFundingRate(unifiedSymbol);
+                case 'Paradex': return await this.paradexService.getLiveFundingRate(unifiedSymbol);
+                case 'Lighter': return await this.lighterService.getLiveFundingRate(unifiedSymbol);
+                case 'Extended': return await this.extendedService.getLiveFundingRate(unifiedSymbol);
                 default: return 0;
             }
         } catch (e) {

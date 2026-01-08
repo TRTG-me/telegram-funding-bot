@@ -241,8 +241,8 @@ export async function executeTrade(
         else if (exchange === 'Extended') {
             const res = await services.extended.placeOrder(symbol, side, qty, userId, 'MARKET');
             let attempts = 0;
-            // Увеличили с 15 до 30 (было 4.5 сек, стало ~9 сек), так как Extended тормозит с подтверждениями
-            const maxAttempts = 30;
+            // Увеличили с 30 до 60 (было ~9 сек, стало ~20 сек), так как Extended тормозит с подтверждениями
+            const maxAttempts = 60;
 
             while (attempts < maxAttempts) {
                 await sleep(300);

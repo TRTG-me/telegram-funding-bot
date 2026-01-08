@@ -243,90 +243,93 @@ export class AutoCloseSession {
                 return levB - levA;
             });
 
-            const tasks = positions.map(pos => async () => {
-                const localLogs: string[] = [];
-                const targetAsset = Helpers.getAssetName(pos.coin);
-                const rawTargetQty = pos.size * alpha;
-                let remainingQtyToClose = this.calculateSafeQuantity(rawTargetQty);
-                if (remainingQtyToClose <= 0) return [];
+            const tasks = positions.map(pos => ({
+                label: pos.coin,
+                fn: async () => {
+                    const localLogs: string[] = [];
+                    const targetAsset = Helpers.getAssetName(pos.coin);
+                    const rawTargetQty = pos.size * alpha;
+                    let remainingQtyToClose = this.calculateSafeQuantity(rawTargetQty);
+                    if (remainingQtyToClose <= 0) return [];
 
-                const closeSide = pos.side === 'L' ? 'SELL' : 'BUY';
+                    const closeSide = pos.side === 'L' ? 'SELL' : 'BUY';
 
-                for (const hedgeExName of sortedHedgeExchanges) {
-                    if (remainingQtyToClose <= 0) break;
-                    const hedgePosList = allHedgePositions[hedgeExName];
-                    const hedgePos = hedgePosList.find(p => Helpers.getAssetName(p.coin) === targetAsset);
+                    for (const hedgeExName of sortedHedgeExchanges) {
+                        if (remainingQtyToClose <= 0) break;
+                        const hedgePosList = allHedgePositions[hedgeExName];
+                        const hedgePos = hedgePosList.find(p => Helpers.getAssetName(p.coin) === targetAsset);
 
-                    if (hedgePos && hedgePos.side !== pos.side) {
-                        let qtyForThisHedge = Math.min(remainingQtyToClose, hedgePos.size);
-                        qtyForThisHedge = this.calculateSafeQuantity(qtyForThisHedge);
-                        if (qtyForThisHedge <= 0) continue;
+                        if (hedgePos && hedgePos.side !== pos.side) {
+                            let qtyForThisHedge = Math.min(remainingQtyToClose, hedgePos.size);
+                            qtyForThisHedge = this.calculateSafeQuantity(qtyForThisHedge);
+                            if (qtyForThisHedge <= 0) continue;
 
-                        hedgePos.size -= qtyForThisHedge;
-                        if (hedgePos.size < 0) hedgePos.size = 0;
+                            hedgePos.size -= qtyForThisHedge;
+                            if (hedgePos.size < 0) hedgePos.size = 0;
 
-                        const hedgeCloseSide = hedgePos.side === 'L' ? 'SELL' : 'BUY';
-                        let currentHedgeExecuted = false;
-                        let pendingHedgeLog: string | null = null;
-                        let pendingHedgeError: string | null = null;
+                            const hedgeCloseSide = hedgePos.side === 'L' ? 'SELL' : 'BUY';
+                            let currentHedgeExecuted = false;
+                            let pendingHedgeLog: string | null = null;
+                            let pendingHedgeError: string | null = null;
 
-                        try {
-                            const res = await Helpers.executeTrade(hedgeExName as ExchangeName, hedgePos.coin, hedgeCloseSide, qtyForThisHedge, this.services, this.userId);
-                            if (res.success) {
-                                currentHedgeExecuted = true;
-                                pendingHedgeLog = `✅ Hedge closed on ${hedgeExName}: ${qtyForThisHedge}`;
-                            } else {
-                                pendingHedgeError = `⚠️ Hedge fail on ${hedgeExName}: ${res.error}`;
-                                hedgePos.size += qtyForThisHedge;
-                            }
-                        } catch (e: any) {
-                            pendingHedgeError = `⚠️ Hedge exc error on ${hedgeExName}: ${e.message}`;
-                            hedgePos.size += qtyForThisHedge;
-                        }
-
-                        if (currentHedgeExecuted || ALLOW_UNHEDGED_CLOSE) {
                             try {
-                                const mainRes = await Helpers.executeTrade(exchangeName, pos.coin, closeSide, qtyForThisHedge, this.services, this.userId);
-                                if (mainRes.success) {
-                                    const exCodeMain = exchangeName.charAt(0);
-                                    const hedgeSymbol = currentHedgeExecuted ? hedgeExName.charAt(0) : 'NO_HEDGE';
-                                    localLogs.push(`✂️ <b>${pos.coin} ${exCodeMain}-${hedgeSymbol}</b>: ${qtyForThisHedge}`);
-                                    if (pendingHedgeLog) localLogs.push(pendingHedgeLog);
-                                    if (pendingHedgeError) localLogs.push(pendingHedgeError);
-                                    remainingQtyToClose -= qtyForThisHedge;
-                                    remainingQtyToClose = this.calculateSafeQuantity(remainingQtyToClose);
+                                const res = await Helpers.executeTrade(hedgeExName as ExchangeName, hedgePos.coin, hedgeCloseSide, qtyForThisHedge, this.services, this.userId);
+                                if (res.success) {
+                                    currentHedgeExecuted = true;
+                                    pendingHedgeLog = `✅ Hedge closed on ${hedgeExName}: ${qtyForThisHedge}`;
                                 } else {
-                                    if (pendingHedgeLog) localLogs.push(pendingHedgeLog);
-                                    if (pendingHedgeError) localLogs.push(pendingHedgeError);
-                                    localLogs.push(`❌ Main Close Fail ${exchangeName} ${pos.coin}: ${mainRes.error}`);
+                                    pendingHedgeError = `⚠️ Hedge fail on ${hedgeExName}: ${res.error}`;
+                                    hedgePos.size += qtyForThisHedge;
                                 }
                             } catch (e: any) {
-                                if (pendingHedgeLog) localLogs.push(pendingHedgeLog);
-                                if (pendingHedgeError) localLogs.push(pendingHedgeError);
-                                localLogs.push(`❌ Main Exc Error: ${e.message}`);
+                                pendingHedgeError = `⚠️ Hedge exc error on ${hedgeExName}: ${e.message}`;
+                                hedgePos.size += qtyForThisHedge;
                             }
-                        }
-                    }
-                }
 
-                if (remainingQtyToClose > 0 && ALLOW_UNHEDGED_CLOSE) {
-                    if (remainingQtyToClose > 0) {
-                        try {
-                            const mainRes = await Helpers.executeTrade(exchangeName, pos.coin, closeSide, remainingQtyToClose, this.services, this.userId);
-                            if (mainRes.success) {
-                                const exCodeMain = exchangeName.charAt(0);
-                                localLogs.push(`✂️ <b>${pos.coin} ${exCodeMain}-PANIC</b>: ${remainingQtyToClose} (Unhedged)`);
-                                remainingQtyToClose = 0;
-                            } else {
-                                localLogs.push(`❌ Panic Close Fail ${exchangeName} ${pos.coin}: ${mainRes.error}`);
+                            if (currentHedgeExecuted || ALLOW_UNHEDGED_CLOSE) {
+                                try {
+                                    const mainRes = await Helpers.executeTrade(exchangeName, pos.coin, closeSide, qtyForThisHedge, this.services, this.userId);
+                                    if (mainRes.success) {
+                                        const exCodeMain = exchangeName.charAt(0);
+                                        const hedgeSymbol = currentHedgeExecuted ? hedgeExName.charAt(0) : 'NO_HEDGE';
+                                        localLogs.push(`✂️ <b>${pos.coin} ${exCodeMain}-${hedgeSymbol}</b>: ${qtyForThisHedge}`);
+                                        if (pendingHedgeLog) localLogs.push(pendingHedgeLog);
+                                        if (pendingHedgeError) localLogs.push(pendingHedgeError);
+                                        remainingQtyToClose -= qtyForThisHedge;
+                                        remainingQtyToClose = this.calculateSafeQuantity(remainingQtyToClose);
+                                    } else {
+                                        if (pendingHedgeLog) localLogs.push(pendingHedgeLog);
+                                        if (pendingHedgeError) localLogs.push(pendingHedgeError);
+                                        localLogs.push(`❌ Main Close Fail ${exchangeName} ${pos.coin}: ${mainRes.error}`);
+                                    }
+                                } catch (e: any) {
+                                    if (pendingHedgeLog) localLogs.push(pendingHedgeLog);
+                                    if (pendingHedgeError) localLogs.push(pendingHedgeError);
+                                    localLogs.push(`❌ Main Exc Error: ${e.message}`);
+                                }
                             }
-                        } catch (e: any) {
-                            localLogs.push(`❌ Panic Exc Error: ${e.message}`);
                         }
                     }
+
+                    if (remainingQtyToClose > 0 && ALLOW_UNHEDGED_CLOSE) {
+                        if (remainingQtyToClose > 0) {
+                            try {
+                                const mainRes = await Helpers.executeTrade(exchangeName, pos.coin, closeSide, remainingQtyToClose, this.services, this.userId);
+                                if (mainRes.success) {
+                                    const exCodeMain = exchangeName.charAt(0);
+                                    localLogs.push(`✂️ <b>${pos.coin} ${exCodeMain}-PANIC</b>: ${remainingQtyToClose} (Unhedged)`);
+                                    remainingQtyToClose = 0;
+                                } else {
+                                    localLogs.push(`❌ Panic Close Fail ${exchangeName} ${pos.coin}: ${mainRes.error}`);
+                                }
+                            } catch (e: any) {
+                                localLogs.push(`❌ Panic Exc Error: ${e.message}`);
+                            }
+                        }
+                    }
+                    return localLogs;
                 }
-                return localLogs;
-            });
+            }));
 
             const isL2Exchange = ['Lighter', 'Extended', 'Paradex'].includes(exchangeName);
             const concurrency = isL2Exchange ? 1 : 5;
@@ -431,7 +434,7 @@ export class AutoCloseSession {
         return parseFloat(result.toFixed(8));
     }
 
-    private async runWithConcurrency<T>(tasks: (() => Promise<T>)[], concurrency: number): Promise<T[]> {
+    private async runWithConcurrency<T>(tasks: { label: string, fn: () => Promise<T> }[], concurrency: number): Promise<T[]> {
         const results: T[] = [];
         const executing: Promise<void>[] = [];
 
@@ -445,7 +448,7 @@ export class AutoCloseSession {
                 const timeoutPromise = new Promise<never>((_, reject) =>
                     setTimeout(() => reject(new Error('Task Timeout')), TIMEOUT_MS)
                 );
-                return Promise.race([task(), timeoutPromise]);
+                return Promise.race([task.fn(), timeoutPromise]);
             };
 
             const p = taskWithTimeout()
@@ -453,11 +456,9 @@ export class AutoCloseSession {
                     results.push(result);
                 })
                 .catch(err => {
-                    this.logger.error(`[User ${this.userId}] Task failed/timed out: ${err.message}`);
-                    // Возвращаем ошибку в отчет, чтобы юзер видел её в ТГ
-                    // Cast to T (подразумеваем, что T это string[] или совместимо, либо просто игнорируем типы для ошибки)
-                    // Но так как T unknown, лучше просто добавить в results, если это string[]
-                    results.push([`❌ Task Failed/Timeout: ${err.message}`] as unknown as T);
+                    this.logger.error(`[User ${this.userId}] Task ${task.label} failed/timed out: ${err.message}`);
+                    // Возвращаем ошибку в отчет с именем монеты
+                    results.push([`❌ <b>${task.label}</b>: Task Failed/Timeout: ${err.message}`] as unknown as T);
                 });
 
             executing.push(p);

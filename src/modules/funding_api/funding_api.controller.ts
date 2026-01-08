@@ -70,7 +70,7 @@ export class FundingApiController {
                 return;
             }
 
-            const c0 = 12; // COIN (PAIR)
+            const c0 = 14; // COIN (PAIR)
             const cW = 5;  // DATA
 
             let report = '💎 <b>ТОП МОНЕТЫ (APR %)</b>\n\n';
@@ -288,7 +288,7 @@ export class FundingApiController {
         };
         const live1 = liveAPRs.get(ex1) || 0;
         const live2 = liveAPRs.get(ex2) || 0;
-        const liveDiff = live1 - live2;
+        const liveDiff = live2 - live1;
 
         const top = `┌${'─'.repeat(c0)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┐\n`;
         const line = `├${'─'.repeat(c0)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┤\n`;
@@ -300,7 +300,7 @@ export class FundingApiController {
         let table = `📊 <b>${coin}</b>: ${this.exchangeIcons[ex1] || ''}${ex1} 🆚 ${this.exchangeIcons[ex2] || ''}${ex2}\n<pre><code>${top}│${'T-APR'.padEnd(c0)}│${'8h'.padStart(cW)}│${'1d'.padStart(cW)}│${'3d'.padStart(cW)}│${'7d'.padStart(cW)}│${'14d'.padStart(cW)}│${'cur'.padStart(cW)}│\n${line}`;
         const aprs1 = comp.results.map((r: any) => isEx1FirstValue ? r.apr1 : r.apr2);
         const aprs2 = comp.results.map((r: any) => isEx1FirstValue ? r.apr2 : r.apr1);
-        const diffs = comp.results.map((r: any) => isEx1FirstValue ? r.diff : -r.diff);
+        const diffs = comp.results.map((r: any) => isEx1FirstValue ? -r.diff : r.diff);
 
         table += `│${label1}│${aprs1.map(formatVal).join('│')}│${formatVal(live1)}│\n`;
         table += `│${label2}│${aprs2.map(formatVal).join('│')}│${formatVal(live2)}│\n${line}│${'DIFF'.padEnd(c0)}│${diffs.map(formatVal).join('│')}│${formatVal(liveDiff)}│\n${bottom}</code></pre>`;

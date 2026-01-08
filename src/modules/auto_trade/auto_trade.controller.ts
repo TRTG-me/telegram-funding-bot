@@ -23,9 +23,9 @@ interface AutoTradeState {
 const EXCHANGES: ExchangeName[] = ['Binance', 'Hyperliquid', 'Paradex', 'Extended', 'Lighter'];
 
 const MAIN_KEYBOARD = Markup.keyboard([
-    ['Плечи', 'Позиции', 'Фандинги', 'bp', 'OPEN POS'],
-    ['Включить Alert', 'Выключить Alert', '✏️Изменить ранги'],
-    ['🚀 Запустить тикер', '🛑 Остановить тикер']
+    ['Плечи', 'Позиции', 'bp', 'OPEN POS'],
+    ['Ручная проверка', 'Автоматическая проверка'],
+    ['Настройки', '🔙 Назад в меню']
 ]).resize();
 
 export class AutoTradeController {
@@ -245,9 +245,11 @@ export class AutoTradeController {
             onFinished: async () => {
                 if (state.statusMessageId) {
                     try {
-                        await ctx.telegram.editMessageText(userId, state.statusMessageId, undefined, '🏁 <b>Сессия завершена.</b>', { parse_mode: 'HTML' });
+                        await ctx.telegram.editMessageText(userId, state.statusMessageId, undefined, '🏁 <b>Сессия завершена (см. логи).</b>', { parse_mode: 'HTML' });
                     } catch { }
                 }
+                // Восстанавливаем клавиатуру
+                await ctx.telegram.sendMessage(userId, 'Торговля остановлена. Главное меню.', { ...MAIN_KEYBOARD });
                 this.userStates.delete(userId);
                 this.userStateTimestamps.delete(userId); // C3 FIX
             }
