@@ -3,3 +3,4 @@
 {"timestamp":"2025-12-24T14:41:54.749Z","event":"CRITICAL_LEG_FAILURE","userId":334987233,"type":"LONG_FAILED_SHORT_OPEN","longError":"Extended API Timeout: Order 7dcc1e1e-e181-417b-8411-dba3533d777a unverified","qty":1000}
 {"timestamp":"2026-01-04T11:46:28.738Z","event":"CRITICAL_LEG_FAILURE","userId":334987233,"type":"LONG_FAILED_SHORT_OPEN","longError":"HL Error: Failed to place order on Hyperliquid: Hyperliquid returned error: Price too far from oracle asset=4","qty":2}
 {"timestamp":"2026-01-04T11:47:23.323Z","event":"CRITICAL_LEG_FAILURE","userId":334987233,"type":"LONG_FAILED_SHORT_OPEN","longError":"HL Error: Failed to place order on Hyperliquid: Hyperliquid returned error: Price too far from oracle asset=4","qty":0.5}
+{"timestamp":"2026-01-06T13:02:05.200Z","event":"CRITICAL_LEG_FAILURE","userId":334987233,"type":"SHORT_FAILED_LONG_OPEN","shortError":"Extended API Timeout: Order 4db2535f-c8cc-4f9a-89d7-2be6ae48e2fe unverified","qty":1000}
