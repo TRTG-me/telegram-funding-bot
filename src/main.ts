@@ -163,7 +163,7 @@ async function start() {
     const lighterController = new LighterController(lighterService);
     const autoCloseController = new AutoCloseController(autoCloseService);
     const payBackController = new PayBackController(payBackService);
-    const fundingApiController = new FundingApiController(fundingApiService);
+    const fundingApiController = new FundingApiController(fundingApiService, payBackService);
     const usersController = new UsersController(userService);
     const settingsController = new SettingsController(settingsService, userState);
 
@@ -236,8 +236,9 @@ async function start() {
         ];
 
         const fundingApiCommands = [
-            'Фандинги Поз', 'Окупаемость',
-            '🔍 Фандинг монеты', '🏆 Лучшие монеты', '🔄 Обновить список монет', '🚀 Обновить БД'
+            'Фандинги Поз', '🏆 Лучшие монеты',
+            '🔍 Фандинг монеты', '🔍 Окупаемость монеты',
+            '⚙️ Настройки', '🔙 Назад в меню'
         ];
 
         if (mainMenuCommands.includes(text)) {
@@ -277,16 +278,14 @@ async function start() {
             switch (text) {
                 case 'Фандинги Поз':
                     return totalFundingsController.displayHistoricalFunding(ctx);
-                case 'Окупаемость':
+                case '🔍 Окупаемость монеты':
                     return payBackController.handlePayBackCommand(ctx);
                 case '🔍 Фандинг монеты':
                     return fundingApiController.handleCoinAnalysisStart(ctx);
                 case '🏆 Лучшие монеты':
                     return fundingApiController.handleBestOpportunities(ctx);
-                case '🔄 Обновить список монет':
-                    return fundingApiController.handleSyncCoins(ctx);
-                case '🚀 Обновить БД':
-                    return fundingApiController.handleSyncFull(ctx);
+                case '⚙️ Настройки':
+                    return fundingApiController.handleFundingSettings(ctx);
             }
             return;
         }

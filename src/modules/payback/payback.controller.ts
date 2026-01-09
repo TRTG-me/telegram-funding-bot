@@ -26,12 +26,8 @@ export class PayBackController {
             return;
         }
 
-        const keyboard = Markup.inlineKeyboard([
-            [Markup.button.callback('🪙 Одна монета', 'payback_mode_single')],
-            [Markup.button.callback('📊 Deep Scan (TOP Moнет)', 'payback_mode_deep')]
-        ]);
-
-        await ctx.reply('🔍 <b>Окупаемость входа</b>\nВыберите режим расчета:', { parse_mode: 'HTML', ...keyboard });
+        this.userStates.set(userId, { step: 'awaiting_coin' });
+        await ctx.reply('🔍 <b>Тест Окупаемости Монеты (1 мин)</b>\nВведите тикер монеты (например: BTC):', { parse_mode: 'HTML' });
     }
 
     public async handleTextInput(ctx: Context): Promise<void> {
@@ -65,26 +61,6 @@ export class PayBackController {
 
         const userId = ctx.from.id;
 
-        if (data === 'payback_mode_single') {
-            this.userStates.set(userId, { step: 'awaiting_coin' });
-            await ctx.editMessageText('🔍 <b>Тест Окупаемости (1 мин)</b>\nВведите тикер монеты (например: BTC):', { parse_mode: 'HTML' });
-            return;
-        }
-
-        if (data === 'payback_mode_deep') {
-            await ctx.editMessageText('🚀 <b>Запускаю Deep Scan (Глубокий анализ)</b>\n\n1. Собираю лучшие пары из API...\n2. Открываю WebSocket соединения...\n3. Считаю реальный БП 60 секунд.\n\n⏳ Пожалуйста, подождите...', { parse_mode: 'HTML' });
-
-            try {
-                await this.payBackService.startDeepScan(userId, async (result) => {
-                    if (typeof result === 'string') {
-                        await ctx.telegram.sendMessage(userId, result, { parse_mode: 'HTML' });
-                    }
-                });
-            } catch (err: any) {
-                await ctx.reply(`❌ Ошибка запуска Deep Scan: ${err.message}`);
-            }
-            return;
-        }
 
         const state = this.userStates.get(userId);
         if (!state) return;

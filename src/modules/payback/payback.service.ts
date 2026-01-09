@@ -47,33 +47,40 @@ export class PayBackService {
     }
 
     public async startDeepScan(userId: number, onFinished: (result: string) => void): Promise<void> {
+        const best = await this.fundingApiService.getBestOpportunities();
+        await this.startPagePayback(userId, best.slice(0, 25), '📊 <b>DEEP SCAN (TOP-25)</b>', onFinished);
+    }
+
+    public async startPagePayback(
+        userId: number,
+        items: any[],
+        title: string,
+        onFinished: (result: string) => void
+    ): Promise<void> {
         this.stopSession(userId);
 
         try {
-            const best = await this.fundingApiService.getBestOpportunities();
-            const top = best.slice(0, 25);
-
-            if (top.length === 0) {
-                onFinished('📭 Не удалось найти лучшие монеты для глубокого анализа.');
+            if (!items || items.length === 0) {
+                onFinished('📭 Не удалось найти монеты для анализа.');
                 return;
             }
 
             const sessions: PayBackSession[] = [];
             this.sessions.set(userId, sessions);
 
-            const pendingResults: (PayBackResult | null)[] = new Array(top.length).fill(null);
+            const pendingResults: (PayBackResult | null)[] = new Array(items.length).fill(null);
             let finishedCount = 0;
 
             const checkFinished = async () => {
                 finishedCount++;
-                if (finishedCount === top.length) {
+                if (finishedCount === items.length) {
                     this.sessions.delete(userId);
-                    onFinished(this.formatDeepScanTable(top, pendingResults));
+                    onFinished(this.formatDeepScanTable(items, pendingResults, title));
                 }
             };
 
-            for (let i = 0; i < top.length; i++) {
-                const item = top[i];
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
                 const parts = item.pair.split('-');
                 const longEx = EXCHANGE_MAP[parts[0]];
                 const shortEx = EXCHANGE_MAP[parts[1]];
@@ -83,7 +90,7 @@ export class PayBackService {
                     continue;
                 }
 
-                await new Promise(r => setTimeout(r, 500));
+                await new Promise(r => setTimeout(r, 400)); // Немного быстрее
 
                 const session = new PayBackSession(userId, this.lighterDataService, this.fundingApiService);
                 sessions.push(session);
@@ -100,12 +107,12 @@ export class PayBackService {
         }
     }
 
-    private formatDeepScanTable(originalItems: any[], results: (PayBackResult | null)[]): string {
+    private formatDeepScanTable(originalItems: any[], results: (PayBackResult | null)[], title: string): string {
         const c0 = 14; // COIN (P)
         const cW = 5;  // DATA
         const cP = 6;  // P.DAY
 
-        let table = '📊 <b>DEEP SCAN (TOP-25)</b>\n<pre><code>';
+        let table = `${title}\n<pre><code>`;
         table += `┌${'─'.repeat(c0)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cP)}┐\n`;
         table += `│${'COIN (P)'.padEnd(c0)}│${'8h'.padStart(cW)}│${'1d'.padStart(cW)}│${'3d'.padStart(cW)}│${'7d'.padStart(cW)}│${'14d'.padStart(cW)}│${'P.DAY'.padStart(cP)}│\n`;
         table += `├${'─'.repeat(c0)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cP)}┤\n`;
