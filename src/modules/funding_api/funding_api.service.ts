@@ -14,7 +14,8 @@ import * as Helpers from '../auto_trade/auto_trade.helpers';
 @Injectable()
 export class FundingApiService {
     private readonly logger = new Logger(FundingApiService.name);
-    private readonly API_BASE = 'http://localhost:3000/api';
+    private readonly API_BASE = process.env.FUNDING_API_URL || 'http://localhost:3005/api';
+    private readonly API_TIMEOUT = 30000; // 30 секунд таймаут для всех запросов
     private chartJSNodeCanvas: ChartJSNodeCanvas;
 
     constructor(
@@ -48,29 +49,42 @@ export class FundingApiService {
     }
 
     async getCoins(): Promise<string[]> {
-        const resp = await axios.get(`${this.API_BASE}/coins`);
+        const resp = await axios.get(`${this.API_BASE}/coins`, { timeout: this.API_TIMEOUT });
         return resp.data.coins;
     }
 
-    async getBestOpportunities(exchanges?: string[]): Promise<BestOpportunity[]> {
-        const params = exchanges ? { exchanges: exchanges.join(',') } : {};
-        const resp = await axios.get(`${this.API_BASE}/best-opportunities`, { params });
+    async getBestOpportunities(exchanges?: string[], presetId?: number): Promise<BestOpportunity[]> {
+        const params: any = {};
+        if (exchanges) params.exchanges = exchanges.join(',');
+        if (presetId) params.presetId = presetId;
+
+        const resp = await axios.get(`${this.API_BASE}/best-opportunities`, { params, timeout: this.API_TIMEOUT });
         return resp.data.data;
     }
 
     async getCoinAnalysis(coin: string, exchanges?: string[]): Promise<CoinAnalysisResponse> {
         const params = exchanges ? { exchanges: exchanges.join(',') } : {};
-        const resp = await axios.get(`${this.API_BASE}/coin/${coin}`, { params });
+        const resp = await axios.get(`${this.API_BASE}/coin/${coin}`, { params, timeout: this.API_TIMEOUT });
         return resp.data;
     }
 
     async syncFull(): Promise<any> {
-        const resp = await axios.post(`${this.API_BASE}/sync/full`, {}, { timeout: 120000 });
+        const resp = await axios.post(`${this.API_BASE}/sync/full`, {}, { timeout: 180000 }); // 3 минуты для полной синхронизации
         return resp.data;
     }
 
     async syncCoins(): Promise<any> {
         const resp = await axios.post(`${this.API_BASE}/sync/coins`, {}, { timeout: 60000 });
+        return resp.data;
+    }
+
+    async getPresets(): Promise<any[]> {
+        const resp = await axios.get(`${this.API_BASE}/presets`, { timeout: this.API_TIMEOUT });
+        return resp.data.data;
+    }
+
+    async updatePreset(id: number, data: { h8: number, d1: number, d3: number, d7: number, d14: number }): Promise<any> {
+        const resp = await axios.put(`${this.API_BASE}/presets/${id}`, data, { timeout: this.API_TIMEOUT });
         return resp.data;
     }
 

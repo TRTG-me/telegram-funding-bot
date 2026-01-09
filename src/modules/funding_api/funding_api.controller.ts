@@ -1,9 +1,11 @@
 import { Context, Markup } from 'telegraf';
 import { FundingApiService } from './funding_api.service';
 import { FundingApiState } from './funding_api.types';
+import { PayBackService } from '../payback/payback.service';
 
 export class FundingApiController {
     private userState = new Map<number, FundingApiState & { scanSelected?: string[] }>();
+    private isScanning = false;
 
     private readonly exchangeIcons: Record<string, string> = {
         'Binance': '',
@@ -13,7 +15,10 @@ export class FundingApiController {
         'Extended': ''
     };
 
-    constructor(private readonly fundingApiService: FundingApiService) { }
+    constructor(
+        private readonly fundingApiService: FundingApiService,
+        private readonly payBackService: PayBackService
+    ) { }
 
     private getExName(name: string): string {
         return `${this.exchangeIcons[name] || ''} ${name}`.trim();
@@ -21,28 +26,48 @@ export class FundingApiController {
 
     public isUserInFlow(userId: number): boolean {
         const state = this.userState.get(userId);
-        return !!state && (state.step === 'awaiting_coin' || state.step === 'selecting_exchanges');
+        return !!state && (state.step === 'awaiting_coin' || state.step === 'selecting_exchanges' || state.step === 'editing_preset');
     }
 
     public async handleFundingMenu(ctx: Context): Promise<void> {
         const keyboard = Markup.keyboard([
-            ['Фандинги Поз', 'Окупаемость'],
-            ['🔍 Фандинг монеты', '🏆 Лучшие монеты', '🔄 Обновить список монет', '🚀 Обновить БД'],
-            ['🔙 Назад в меню']
+            ['Фандинги Поз', '🏆 Лучшие монеты'],
+            ['🔍 Фандинг монеты', '🔍 Окупаемость монеты'],
+            ['⚙️ Настройки', '🔙 Назад в меню']
         ]).resize();
 
-        await ctx.reply('💎 <b>Аналитика Фандинга</b>\nВыберите раздел:', { parse_mode: 'HTML', ...keyboard });
+        await ctx.reply('Меню фандинга и анализа:', keyboard);
     }
 
     // --- ЛУЧШИЕ МОНЕТЫ (СКАНЕР) ---
 
     public async handleBestOpportunities(ctx: Context): Promise<void> {
         const keyboard = Markup.inlineKeyboard([
-            [Markup.button.callback('🌐 Все биржи', 'fapi_scan_all')],
-            [Markup.button.callback('⚙️ Ручной выбор', 'fapi_scan_manual')]
+            [Markup.button.callback('🌐 Все биржи', 'fapi_scan_mode_all')],
+            [Markup.button.callback('⚙️ Ручной выбор', 'fapi_scan_mode_manual')]
         ]);
 
         await ctx.reply('📊 Выберите режим сканирования:', keyboard);
+    }
+
+    private async showPresetSelection(ctx: Context, mode: 'all' | 'manual') {
+        const presets = await this.fundingApiService.getPresets();
+
+        let text = `🎯 <b>ВЫБОР ФИЛЬТРА (${mode === 'all' ? 'Все биржи' : 'Ручной выбор'})</b>\n\n`;
+        text += '<pre><code>';
+        text += `| P | 8h | 1d | 3d | 7d | 14d |\n`;
+        text += `|---|----|----|----|----|-----|\n`;
+        for (const p of presets) {
+            const num = p.name.substring(7);
+            text += `| ${num} | ${p.h8.toString().padStart(2)} | ${p.d1.toString().padStart(2)} | ${p.d3.toString().padStart(2)} | ${p.d7.toString().padStart(2)} | ${p.d14.toString().padStart(3)} |\n`;
+        }
+        text += '</code></pre>\n';
+        text += 'Выберите кнопку соответствующего пресета:';
+
+        const buttons = presets.map(p => Markup.button.callback(p.name.substring(7), `fapi_scan_preset_${p.id}_${mode}`));
+        const keyboard = Markup.inlineKeyboard([buttons]);
+
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
     }
 
     private getScanKeyboard(selected: string[]) {
@@ -60,40 +85,93 @@ export class FundingApiController {
         return Markup.inlineKeyboard(rows);
     }
 
-    private async runScan(ctx: Context, selectedExchanges?: string[]) {
+    private async runScan(ctx: Context, presetId: number, selectedExchanges?: string[]) {
+        if (this.isScanning) {
+            await ctx.reply('⚠️ Сканер уже работает. Пожалуйста, подождите.');
+            return;
+        }
+        let waitMsg: any = null;
         try {
-            await ctx.reply('⏳ Запускаю сканер лучших возможностей...\nЭто может занять 15-30 секунд.');
-            const best = await this.fundingApiService.getBestOpportunities(selectedExchanges);
+            this.isScanning = true;
+            const userId = ctx.from!.id;
+            waitMsg = await ctx.reply('⏳ Запускаю сканер лучших возможностей...\nЭто может занять 15-30 секунд.');
+
+            const best = await this.fundingApiService.getBestOpportunities(selectedExchanges, presetId);
+
+            if (waitMsg) {
+                await ctx.deleteMessage(waitMsg.message_id).catch(() => { });
+            }
 
             if (!best || best.length === 0) {
                 await ctx.reply('📭 На данный момент монет, подходящих под критерии фильтра, не найдено.');
                 return;
             }
 
-            const c0 = 14; // COIN (PAIR)
-            const cW = 5;  // DATA
-
-            let report = '💎 <b>ТОП МОНЕТЫ (APR %)</b>\n\n';
-            let table = '<pre><code>';
-            table += `┌${'─'.repeat(c0)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┐\n`;
-            table += `│${'COIN (P)'.padEnd(c0)}│${'8h'.padStart(cW)}│${'1d'.padStart(cW)}│${'3d'.padStart(cW)}│${'7d'.padStart(cW)}│${'14d'.padStart(cW)}│\n`;
-            table += `├${'─'.repeat(c0)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┤\n`;
-
-            best.slice(0, 30).forEach(item => {
-                const label = `${item.coin} (${item.pair})`.substring(0, c0).padEnd(c0);
-                const diffs = item.diffs.map(v => v.toFixed(0).padStart(cW)).join('│');
-                table += `│${label}│${diffs}│\n`;
+            // Инициализируем состояние пагинации
+            this.userState.set(userId, {
+                step: 'idle',
+                selectedExchanges: [],
+                availableExchanges: [],
+                scanResults: best,
+                scanPage: 0
             });
 
-            table += `└${'─'.repeat(c0)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┘\n`;
-            table += '</code></pre>';
-
-            report += table;
-            report += '\n<i>*(P): Направление. Например H-B: Long HL / Short Binance</i>';
-
-            await ctx.replyWithHTML(report);
+            await this.displayScanPage(ctx, userId, 0);
         } catch (err: any) {
+            if (waitMsg) {
+                await ctx.deleteMessage(waitMsg.message_id).catch(() => { });
+            }
             await ctx.reply(`❌ Ошибка сканирования: ${err.message}`);
+        } finally {
+            this.isScanning = false;
+        }
+    }
+
+    private async displayScanPage(ctx: Context, userId: number, page: number) {
+        const state = this.userState.get(userId);
+        if (!state || !state.scanResults) return;
+
+        const pageSize = 15;
+        const total = state.scanResults.length;
+        const totalPages = Math.ceil(total / pageSize);
+        const start = page * pageSize;
+        const end = Math.min(start + pageSize, total);
+        const items = state.scanResults.slice(start, end);
+
+        const c0 = 14; // COIN (PAIR)
+        const cW = 5;  // DATA
+
+        let report = `💎 <b>ТОП МОНЕТЫ (APR %)</b>\n`;
+        report += `Страница ${page + 1} (${start + 1}-${end} из ${total})\n\n`;
+        let table = '<pre><code>';
+        table += `┌${'─'.repeat(c0)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┬${'─'.repeat(cW)}┐\n`;
+        table += `│${'COIN (P)'.padEnd(c0)}│${'8h'.padStart(cW)}│${'1d'.padStart(cW)}│${'3d'.padStart(cW)}│${'7d'.padStart(cW)}│${'14d'.padStart(cW)}│\n`;
+        table += `├${'─'.repeat(c0)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┼${'─'.repeat(cW)}┤\n`;
+
+        items.forEach(item => {
+            const label = `${item.coin} (${item.pair})`.substring(0, c0).padEnd(c0);
+            const diffs = item.diffs.map(v => v.toFixed(0).padStart(cW)).join('│');
+            table += `│${label}│${diffs}│\n`;
+        });
+
+        table += `└${'─'.repeat(c0)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┴${'─'.repeat(cW)}┘\n`;
+        table += '</code></pre>';
+        report += table;
+        report += '\n<i>*(P): Направление. Например H-B: Long HL / Short Binance</i>';
+
+        const navButtons = [];
+        if (page > 0) navButtons.push(Markup.button.callback('⬅️ Назад', `fapi_scan_page_prev`));
+        if (page < totalPages - 1) navButtons.push(Markup.button.callback('Вперед ➡️', `fapi_scan_page_next`));
+
+        const keyboard = Markup.inlineKeyboard([
+            navButtons,
+            [Markup.button.callback('📊 Окупаемость страницы', 'fapi_page_payback')]
+        ]);
+
+        if (ctx.callbackQuery) {
+            await ctx.editMessageText(report, { parse_mode: 'HTML', ...keyboard });
+        } else {
+            await ctx.replyWithHTML(report, keyboard);
         }
     }
 
@@ -134,6 +212,31 @@ export class FundingApiController {
                 }
                 this.userState.delete(userId);
             }
+        } else if (state.step === 'editing_preset' && state.editingPresetId) {
+            const text = ctx.message.text.trim();
+            const vals = text.split(/[,\s]+/).map((v: string) => parseFloat(v));
+            if (vals.length === 5 && vals.every((v: number) => !isNaN(v))) {
+                try {
+                    await this.fundingApiService.updatePreset(state.editingPresetId, {
+                        h8: vals[0], d1: vals[1], d3: vals[2], d7: vals[3], d14: vals[4]
+                    });
+                    await ctx.reply(`✅ Пресет ${state.editingPresetId} обновлен!`);
+                    this.userState.delete(userId);
+                    await this.showFundingSettings(ctx);
+                } catch (err: any) {
+                    await ctx.reply(`❌ Ошибка сохранения: ${err.message}`);
+                }
+            } else {
+                await ctx.reply('❌ Некорректный формат. Нужно 5 чисел через запятую или пробел.\nПример: 30, 30, 25, 25, 20');
+            }
+            return;
+        }
+
+        // --- Массовое редактирование через таблицу ---
+        const text = ctx.message.text.trim();
+        if (text.includes('| P |') && text.includes('| 8h |')) {
+            this.userState.set(userId, { step: 'idle', selectedExchanges: [], availableExchanges: [], candidateText: text });
+            await ctx.reply('📥 Данные всей таблицы получены. Нажмите "✅ Сохранить таблицу" в меню настроек выше для применения.');
         }
     }
 
@@ -170,14 +273,55 @@ export class FundingApiController {
         const userId = ctx.from.id;
         const state = this.userState.get(userId);
 
-        if (data === 'fapi_scan_all') {
-            await ctx.editMessageText('✅ Выбраны все биржи.');
-            await this.runScan(ctx);
+        if (data === 'fapi_scan_mode_all') {
+            await this.showPresetSelection(ctx, 'all');
             return;
         }
-        if (data === 'fapi_scan_manual') {
+        if (data === 'fapi_scan_mode_manual') {
             this.userState.set(userId, { step: 'idle', selectedExchanges: [], availableExchanges: [], scanSelected: [] });
             await ctx.editMessageText('⚙️ Выберите биржи для сканирования и нажмите ОК:', this.getScanKeyboard([]));
+            return;
+        }
+        if (data.startsWith('fapi_scan_preset_')) {
+            const parts = data.split('_');
+            const presetId = parseInt(parts[3]);
+            const scanMode = parts[4];
+
+            if (scanMode === 'all') {
+                await this.runScan(ctx, presetId);
+            } else {
+                const s = this.userState.get(userId);
+                if (s && s.scanSelected) {
+                    await this.runScan(ctx, presetId, s.scanSelected);
+                }
+            }
+            return;
+        }
+        if (data === 'fapi_scan_page_prev') {
+            const s = this.userState.get(userId);
+            if (s && s.scanResults && s.scanPage !== undefined && s.scanPage > 0) {
+                s.scanPage--;
+                await this.displayScanPage(ctx, userId, s.scanPage);
+            }
+            await ctx.answerCbQuery();
+            return;
+        }
+        if (data === 'fapi_scan_page_next') {
+            const s = this.userState.get(userId);
+            if (s && s.scanResults && s.scanPage !== undefined) {
+                const pageSize = 10;
+                const totalPages = Math.ceil(s.scanResults.length / pageSize);
+                if (s.scanPage < totalPages - 1) {
+                    s.scanPage++;
+                    await this.displayScanPage(ctx, userId, s.scanPage);
+                }
+            }
+            await ctx.answerCbQuery();
+            return;
+        }
+        if (data === 'fapi_page_payback') {
+            await this.handlePagePayback(ctx, userId);
+            await ctx.answerCbQuery();
             return;
         }
         if (data.startsWith('fapi_scan_toggle_')) {
@@ -187,9 +331,7 @@ export class FundingApiController {
             if (!s.scanSelected.includes(ex)) s.scanSelected.push(ex);
 
             if (s.scanSelected.length === 5) {
-                await ctx.editMessageText('✅ Выбраны все биржи.');
-                await this.runScan(ctx, s.scanSelected);
-                this.userState.delete(userId);
+                await this.showPresetSelection(ctx, 'manual');
             } else {
                 await ctx.editMessageText(`Выбрано: ${s.scanSelected.join(', ')}\nВыберите еще или нажмите ОК:`, this.getScanKeyboard(s.scanSelected));
             }
@@ -198,9 +340,57 @@ export class FundingApiController {
         if (data === 'fapi_scan_confirm') {
             const s = this.userState.get(userId);
             if (!s || !s.scanSelected || s.scanSelected.length === 0) return;
-            await ctx.editMessageText(`✅ Запускаю расчет для: ${s.scanSelected.join(', ')}`);
-            await this.runScan(ctx, s.scanSelected);
+            await this.showPresetSelection(ctx, 'manual');
+            return;
+        }
+
+        if (data.startsWith('fapi_settings_edit_')) {
+            const id = parseInt(data.replace('fapi_settings_edit_', ''));
+            this.userState.set(userId, { step: 'editing_preset', editingPresetId: id, selectedExchanges: [], availableExchanges: [] });
+            await ctx.reply(`✏️ Редактируем <b>Пресет ${id}</b>\nВведите 5 новых значений через запятую (8h, 1d, 3d, 7d, 14d):`, { parse_mode: 'HTML' });
+            return;
+        }
+
+        if (data === 'fapi_settings_close') {
+            await ctx.deleteMessage().catch(() => { });
             this.userState.delete(userId);
+            return;
+        }
+
+        if (data === 'fapi_settings_save') {
+            const s = this.userState.get(userId);
+            if (!s || !s.candidateText) {
+                await ctx.answerCbQuery('⚠️ Сначала отправьте отредактированную таблицу текстом!', { show_alert: true });
+                return;
+            }
+
+            try {
+                const lines = s.candidateText.split('\n').filter(l => l.includes('|') && !l.includes('8h') && !l.includes('--'));
+                const dbPresets = await this.fundingApiService.getPresets();
+
+                for (const line of lines) {
+                    const cells = line.split('|').map(c => c.trim()).filter(c => c.length > 0);
+                    if (cells.length < 6) continue;
+
+                    const num = cells[0]; // Напр. "1"
+                    const h8 = parseFloat(cells[1]);
+                    const d1 = parseFloat(cells[2]);
+                    const d3 = parseFloat(cells[3]);
+                    const d7 = parseFloat(cells[4]);
+                    const d14 = parseFloat(cells[5]);
+
+                    const existing = dbPresets.find(p => p.name.endsWith(num));
+                    if (existing) {
+                        await this.fundingApiService.updatePreset(existing.id, { h8, d1, d3, d7, d14 });
+                    }
+                }
+
+                await ctx.editMessageText('✅ Все настройки успешно сохранены!');
+                this.userState.delete(userId);
+            } catch (e: any) {
+                await ctx.reply('❌ Ошибка парсинга или сохранения: ' + e.message);
+            }
+            await ctx.answerCbQuery();
             return;
         }
 
@@ -357,6 +547,71 @@ export class FundingApiController {
             }
         } catch (err: any) {
             await ctx.reply(`❌ Ошибка обновления списка монет: ${err.message}`);
+        }
+    }
+
+    public async handleFundingSettings(ctx: Context): Promise<void> {
+        await this.showFundingSettings(ctx);
+    }
+
+    private async showFundingSettings(ctx: Context) {
+        const userId = ctx.from!.id;
+        const presets = await this.fundingApiService.getPresets();
+
+        let text = '⚙️ <b>НАСТРОЙКИ ПОРОГОВ (APR %)</b>\n\n';
+        text += '<pre><code>';
+        text += `| P | 8h | 1d | 3d | 7d | 14d |\n`;
+        text += `|---|----|----|----|----|-----|\n`;
+        for (const p of presets) {
+            const num = p.name.substring(7);
+            text += `| ${num} | ${p.h8.toString().padStart(2)} | ${p.d1.toString().padStart(2)} | ${p.d3.toString().padStart(2)} | ${p.d7.toString().padStart(2)} | ${p.d14.toString().padStart(3)} |\n`;
+        }
+        text += '</code></pre>\n';
+        text += '💡 <b>Как изменить?</b>\n';
+        text += 'Нажмите кнопку нужного пресета ниже и введите 5 чисел через запятую.';
+
+        const pButtons = presets.map(p => Markup.button.callback(p.name.substring(7), `fapi_settings_edit_${p.id}`));
+        const keyboard = Markup.inlineKeyboard([
+            pButtons,
+            [Markup.button.callback('✅ Сохранить таблицу', 'fapi_settings_save')],
+            [Markup.button.callback('❌ Закрыть', 'fapi_settings_close')]
+        ]);
+
+        if (ctx.callbackQuery) {
+            await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+        } else {
+            await ctx.replyWithHTML(text, keyboard);
+        }
+        this.userState.delete(userId);
+    }
+    private async handlePagePayback(ctx: Context, userId: number) {
+        const s = this.userState.get(userId);
+        if (!s || !s.scanResults || s.scanPage === undefined) {
+            return ctx.reply('⚠️ Сессия истекла или данные не найдены.');
+        }
+
+        const pageSize = 10;
+        const pageItems = s.scanResults.slice(s.scanPage * pageSize, (s.scanPage + 1) * pageSize);
+
+        if (this.payBackService.isSessionActive(userId)) {
+            return ctx.reply('⚠️ Уже запущен расчет окупаемости. Дождитесь завершения.');
+        }
+
+        const msg = await ctx.reply(`🚀 <b>Запускаю расчет окупаемости для ${pageItems.length} монет...</b>\nЭто займет около 60 секунд.\n\n⏳ Пожалуйста, подождите...`, { parse_mode: 'HTML' });
+
+        try {
+            await this.payBackService.startPagePayback(
+                userId,
+                pageItems,
+                `📊 <b>ОКУПАЕМОСТЬ (Стр. ${s.scanPage + 1})</b>`,
+                async (result) => {
+                    await ctx.deleteMessage(msg.message_id).catch(() => { });
+                    await ctx.telegram.sendMessage(userId, result, { parse_mode: 'HTML' });
+                }
+            );
+        } catch (err: any) {
+            await ctx.deleteMessage(msg.message_id).catch(() => { });
+            await ctx.reply(`❌ Ошибка расчета: ${err.message}`);
         }
     }
 }
