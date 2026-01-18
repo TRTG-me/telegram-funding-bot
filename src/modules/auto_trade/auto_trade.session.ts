@@ -9,6 +9,7 @@ import { CriticalLogger } from '../../common/critical.logger'; // H7 FIX
 import * as Helpers from './auto_trade.helpers';
 import { ITradingServices } from './auto_trade.helpers'; // Импортируем интерфейс
 import { TradeSessionConfig, ExchangeName, TradeStatusData } from './auto_trade.types';
+import { WebSocket } from 'ws';
 
 // Тип для тикеров
 type TickerInstance =
@@ -23,6 +24,7 @@ export class AutoTradeSession {
 
     private activeLongTicker: TickerInstance | null = null;
     private activeShortTicker: TickerInstance | null = null;
+    private accountWs: WebSocket | null = null;
 
     private currentLongAsk: number | null = null;
     private currentShortBid: number | null = null;
@@ -37,7 +39,7 @@ export class AutoTradeSession {
     private waitingForPricesCount = 0; // C6 FIX
 
     // Health Buffer (восстановлено)
-    private readonly ALLOWED_BP_SLIPPAGE = 2; // Допуск проскальзывания BP
+    private readonly ALLOWED_BP_SLIPPAGE = 3; // Допуск проскальзывания BP
     private bpHealthBuffer: boolean[] = [true, true, true];
 
     // H4 FIX: Session Timeout
@@ -95,15 +97,26 @@ export class AutoTradeSession {
             this.activeLongTicker = this.createTicker(longExchange);
             this.activeShortTicker = this.createTicker(shortExchange);
 
-            // 4. Подключаем сокеты
-            await Promise.all([
+            // 4. Подключаем сокеты (Цены + Аккаунт)
+            const tickerPromises = [
                 this.activeLongTicker.start(longSymbol, (_, ask: string) => {
                     this.currentLongAsk = parseFloat(ask);
                 }),
                 this.activeShortTicker.start(shortSymbol, (bid: string, _) => {
                     this.currentShortBid = parseFloat(bid);
                 })
-            ]);
+            ];
+
+            // Если одна из бирж Extended - заранее открываем сокет аккаунта
+            if (longExchange === 'Extended' || shortExchange === 'Extended') {
+                tickerPromises.push(
+                    this.services.extended.createAccountUpdatesSocket(this.config.userId)
+                        .then(ws => { this.accountWs = ws; })
+                        .catch(e => { console.error('[Extended WS] Failed to pre-connect:', e.message); })
+                );
+            }
+
+            await Promise.all(tickerPromises);
 
             // 5. Запускаем цикл
             this.runStep();
@@ -382,6 +395,10 @@ export class AutoTradeSession {
         try {
             if (this.activeLongTicker) this.activeLongTicker.stop();
             if (this.activeShortTicker) this.activeShortTicker.stop();
+            if (this.accountWs) {
+                this.accountWs.terminate();
+                this.accountWs = null;
+            }
         } catch (e) { }
 
         this.activeLongTicker = null;

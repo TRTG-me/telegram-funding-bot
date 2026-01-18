@@ -1,9 +1,11 @@
-import { ExchangeName } from './auto_trade.types';
+import { TradeSessionConfig, ExchangeName, TradeStatusData } from './auto_trade.types';
+import { WebSocket } from 'ws';
 import { BinanceService } from '../binance/binance.service';
 import { HyperliquidService } from '../hyperliquid/hyperliquid.service';
 import { ParadexService } from '../paradex/paradex.service';
 import { ExtendedService } from '../extended/extended.service';
 import { LighterService } from '../lighter/lighter.service';
+import { randomUUID } from 'crypto';
 
 // Описываем интерфейс сервисов
 export interface ITradingServices {
@@ -140,7 +142,11 @@ export async function executeTrade(
     side: 'BUY' | 'SELL',
     qty: number,
     services: ITradingServices,
-    userId?: number
+    userId?: number,
+    type: 'LIMIT' | 'MARKET' = 'MARKET',
+    price?: number,
+    slippage?: number,
+    accountWs?: WebSocket
 ): Promise<{ success: boolean, price?: number, error?: string }> {
     try {
         // Получаем правильный символ для биржи
@@ -239,32 +245,65 @@ export async function executeTrade(
 
         // ============ EXTENDED ============
         else if (exchange === 'Extended') {
-            const res = await services.extended.placeOrder(symbol, side, qty, userId, 'MARKET');
-            let attempts = 0;
-            // Увеличили с 30 до 60 (было ~9 сек, стало ~20 сек), так как Extended тормозит с подтверждениями
-            const maxAttempts = 60;
+            const myOrderId = randomUUID();
 
-            while (attempts < maxAttempts) {
-                await sleep(300);
-                try {
-                    const rawDetails = await services.extended.getOrderDetails(res.orderId, userId);
-                    const details = Array.isArray(rawDetails) ? rawDetails[0] : rawDetails;
+            // Используем Race между WebSocket и API опросом
+            return new Promise(async (resolve) => {
+                let resolved = false;
 
-                    if (details) {
-                        const priceStr = details.averagePrice || details.avgFillPrice || details.price;
-                        const realPrice = parseFloat(priceStr);
-                        if (!isNaN(realPrice) && realPrice > 0) {
-                            return { success: true, price: realPrice };
-                        }
+                // 1. WebSocket прослушка (РЕГИСТРИРУЕМ ДО ОТПРАВКИ ОРДЕРА)
+                services.extended.waitForOrderFillViaWebSocket(myOrderId, userId!, 30000, accountWs).then((wsRes) => {
+                    if (!resolved && wsRes.success) {
+                        resolved = true;
+                        console.log(`[Extended] ✅ Order ${myOrderId} confirmed via WebSocket`);
+                        resolve({ success: true, price: wsRes.price });
                     }
-                } catch (e: any) { }
-                attempts++;
-            }
+                }).catch(() => { });
 
-            return {
-                success: false,
-                error: `Extended API Timeout: Order ${res.orderId} unverified`
-            };
+                // 2. ОТПРАВЛЯЕМ ОРДЕР
+                let res: any;
+                try {
+                    res = await services.extended.placeOrder(symbol, side, qty, userId, type, price, slippage, myOrderId);
+                } catch (e: any) {
+                    resolved = true;
+                    resolve({ success: false, error: e.message });
+                    return;
+                }
+
+                // 3. Старый добрый опрос API (как фолбэк)
+                let attempts = 0;
+                const maxAttempts = 50;
+
+                while (attempts < maxAttempts && !resolved) {
+                    await sleep(400);
+                    if (resolved) break;
+
+                    try {
+                        const rawDetails = await services.extended.getOrderDetails(myOrderId, userId);
+                        const details = Array.isArray(rawDetails) ? rawDetails[0] : rawDetails;
+
+                        if (details && !resolved) {
+                            const priceStr = details.averagePrice || details.avgFillPrice || details.price;
+                            const realPrice = parseFloat(priceStr);
+                            if (!isNaN(realPrice) && realPrice > 0) {
+                                resolved = true;
+                                console.log(`[Extended] ✅ Order ${myOrderId} confirmed via API Polling`);
+                                resolve({ success: true, price: realPrice });
+                                break;
+                            }
+                        }
+                    } catch (e: any) { }
+                    attempts++;
+                }
+
+                if (!resolved) {
+                    resolved = true;
+                    resolve({
+                        success: false,
+                        error: `Extended Timeout: Order ${myOrderId} could not be verified by WebSocket or API`
+                    });
+                }
+            });
         }
 
         // ============ LIGHTER ============

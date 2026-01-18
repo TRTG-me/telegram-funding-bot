@@ -2,6 +2,7 @@ import { Context, Markup } from 'telegraf';
 import { AutoTradeService } from './auto_trade.service';
 import { ExchangeName, TradeStatusData } from './auto_trade.types'; // ИМПОРТ ТИПОВ
 import { telegramQueue } from '../../common/telegram.queue'; // C4 FIX
+import { tradeBotKeyboard } from '../../common/keyboards';
 
 interface AutoTradeState {
     step: 'coin' | 'long_ex' | 'short_ex' | 'total_qty' | 'step_qty' | 'bp' | 'running';
@@ -22,11 +23,6 @@ interface AutoTradeState {
 
 const EXCHANGES: ExchangeName[] = ['Binance', 'Hyperliquid', 'Paradex', 'Extended', 'Lighter'];
 
-const MAIN_KEYBOARD = Markup.keyboard([
-    ['Плечи', 'Позиции', 'bp', 'OPEN POS'],
-    ['Ручная проверка', 'Автоматическая проверка'],
-    ['Настройки', '🔙 Назад в меню']
-]).resize();
 
 export class AutoTradeController {
     private userStates = new Map<number, AutoTradeState>();
@@ -96,7 +92,7 @@ export class AutoTradeController {
                 this.autoTradeService.stopSession(userId, 'Остановлено кнопкой OPEN POS');
 
                 // Изменено по просьбе: сообщение пишется в конце, а не редактирует дашборд
-                await ctx.reply('🛑 <b>Набор остановлен вручную.</b>', { parse_mode: 'HTML', ...MAIN_KEYBOARD });
+                await ctx.reply('🛑 <b>Набор остановлен вручную.</b>', { parse_mode: 'HTML', ...tradeBotKeyboard });
 
                 // Сбрасываем ID сообщения, чтобы onFinished (если вызовется) не пытался редактировать его снова
                 // или позволим onFinished пометить его как "Сессия завершена" корректно.
@@ -110,7 +106,7 @@ export class AutoTradeController {
             if (this.isUserInFlow(userId)) {
                 this.userStates.delete(userId);
                 this.userStateTimestamps.delete(userId); // C3 FIX
-                await ctx.reply('🚫 <b>Ввод данных отменен.</b>', { parse_mode: 'HTML', ...MAIN_KEYBOARD });
+                await ctx.reply('🚫 <b>Ввод данных отменен.</b>', { parse_mode: 'HTML', ...tradeBotKeyboard });
                 this.processingUsers.delete(userId); // 🔓 НЕМЕДЛЕННАЯ РАЗБЛОКИРОВКА
                 return;
             }
@@ -249,7 +245,7 @@ export class AutoTradeController {
                     } catch { }
                 }
                 // Восстанавливаем клавиатуру
-                await ctx.telegram.sendMessage(userId, 'Торговля остановлена. Главное меню.', { ...MAIN_KEYBOARD });
+                await ctx.telegram.sendMessage(userId, 'Торговля остановлена. Главное меню.', { ...tradeBotKeyboard });
                 this.userStates.delete(userId);
                 this.userStateTimestamps.delete(userId); // C3 FIX
             }

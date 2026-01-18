@@ -5,7 +5,7 @@ import { IFundingResultRow, IUnhedgedFundingResultRow, IHistoricalFundingData } 
 
 @Injectable()
 export class TotalFundingsService {
-    private readonly BOT_API_URL = 'http://localhost:3000/api';
+    private readonly API_BASE = process.env.FUNDING_API_URL || 'http://localhost:3005/api';
 
     private readonly exchangeMap: Record<string, string> = {
         'B': 'Binance',
@@ -44,7 +44,7 @@ export class TotalFundingsService {
         const coinDataResults = await Promise.all(
             Array.from(coinMap.entries()).map(async ([coin, exchanges]) => {
                 try {
-                    const url = `${this.BOT_API_URL}/coin/${coin}`;
+                    const url = `${this.API_BASE}/coin/${coin}`;
                     const params = { exchanges: exchanges.join(',') };
                     const response = await axios.get(url, { params, timeout: 10000 });
                     return { coin, data: response.data };
