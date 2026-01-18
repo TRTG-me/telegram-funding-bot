@@ -2,6 +2,7 @@ import axios from 'axios';
 import { randomUUID } from 'crypto';
 import { ec, num, shortString, constants } from 'starknet';
 import { poseidonHashMany } from '@scure/starknet';
+import WebSocket from 'ws';
 
 import {
     IExchangeData,
@@ -16,7 +17,8 @@ import { UserService } from '../users/users.service';
 const CONFIG = {
     DEFAULT_SLIPPAGE: 0.0075, // 0.75%
     EXPIRATION_HOURS: 1,
-    HTTP_TIMEOUT: 10000 // <--- НОВОЕ: 10 секунд на запрос
+    HTTP_TIMEOUT: 10000,
+    WS_ORDER_TIMEOUT: 30000 // 30 секунд на ожидание через WebSocket
 };
 
 interface ExtendedContext {
@@ -29,16 +31,22 @@ interface ExtendedContext {
 export class ExtendedService {
     private readonly isTestnet: boolean;
     private readonly apiUrl: string;
+    private readonly wsUrl: string;
 
     // private defaultContext: ExtendedContext; // Removed
     private userContexts = new Map<number, ExtendedContext>();
-
+    private accountSockets = new Map<number, WebSocket>();
+    private orderWaiters = new Map<string, (msg: any) => void>();
     constructor(private userService: UserService) {
         this.isTestnet = process.env.TESTNET === 'true';
 
         this.apiUrl = this.isTestnet
             ? 'https://api.starknet.sepolia.extended.exchange/api/v1'
             : 'https://api.starknet.extended.exchange/api/v1';
+
+        this.wsUrl = this.isTestnet
+            ? 'wss://api.starknet.sepolia.extended.exchange/stream.extended.exchange/v1/account'
+            : 'wss://api.starknet.extended.exchange/stream.extended.exchange/v1/account';
 
         if (this.isTestnet) {
             console.log('🟡 [Extended] Initializing in TESTNET mode');
@@ -234,7 +242,8 @@ export class ExtendedService {
         userId?: number,
         type: 'LIMIT' | 'MARKET' = 'LIMIT',
         price?: number,
-        slippage: number = CONFIG.DEFAULT_SLIPPAGE
+        slippage: number = CONFIG.DEFAULT_SLIPPAGE,
+        orderId?: string
     ): Promise<{ orderId: string, sentPrice: string, type: string }> {
 
         const ctx = await this.getContext(userId);
@@ -293,7 +302,7 @@ export class ExtendedService {
 
             // 3. Расчет комиссии
             const feeRate = Math.max(parseFloat(feesData.makerFeeRate), parseFloat(feesData.takerFeeRate)).toString();
-            const myUuid = randomUUID();
+            const myUuid = orderId || randomUUID();
 
             const orderPayload = {
                 market: symbol,
@@ -467,5 +476,124 @@ export class ExtendedService {
             console.error('[Extended] Simple positions error:', err);
             return [];
         }
+    }
+    // =========================================================================
+    // --- 4. WEBSOCKET ORDER FILL WAITING ---
+    // =========================================================================
+
+    /**
+     * Создает и открывает WebSocket для обновлений аккаунта.
+     * Ждет завершения открытия сокета перед возвратом.
+     */
+    public async createAccountUpdatesSocket(userId: number): Promise<WebSocket> {
+        const ctx = await this.getContext(userId);
+
+        return new Promise((resolve, reject) => {
+            const ws = new WebSocket(this.wsUrl, {
+                headers: {
+                    'X-Api-Key': ctx.apiKey,
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            });
+
+            const timeout = setTimeout(() => {
+                ws.terminate();
+                reject(new Error('WebSocket connection timeout'));
+            }, 10000);
+
+            ws.on('open', () => {
+                clearTimeout(timeout);
+                console.log(`[Extended WS] ✅ Connection established for user ${userId}`);
+
+                ws.on('message', (data: WebSocket.Data) => {
+                    try {
+                        const message = JSON.parse(data.toString());
+                        // console.log(`[Extended WS RAW] User ${userId}:`, JSON.stringify(message)); // Оставим для глубокого дебага
+
+                        const accountData = message.data || message;
+                        if (accountData.orders && Array.isArray(accountData.orders)) {
+                            for (const order of accountData.orders) {
+                                const extId = order.externalId || order.external_id || order.id;
+                                if (extId && this.orderWaiters.has(extId)) {
+                                    const waiter = this.orderWaiters.get(extId);
+                                    if (waiter) waiter(order);
+                                }
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
+                });
+
+                resolve(ws);
+            });
+
+            ws.on('error', (err) => {
+                clearTimeout(timeout);
+                reject(err);
+            });
+        });
+    }
+
+    /**
+     * Ожидает исполнения ордера через WebSocket Account Updates stream.
+     * Может принимать уже открытый сокет (рекомендуется) или открывать новый.
+     */
+    public async waitForOrderFillViaWebSocket(
+        externalId: string,
+        userId: number,
+        timeoutMs: number = CONFIG.WS_ORDER_TIMEOUT,
+        existingWs?: WebSocket
+    ): Promise<{ success: boolean; price?: number; error?: string }> {
+        return new Promise((resolve) => {
+            let timeoutHandle: NodeJS.Timeout | null = null;
+            let resolved = false;
+
+            const cleanup = () => {
+                if (timeoutHandle) {
+                    clearTimeout(timeoutHandle);
+                    timeoutHandle = null;
+                }
+                this.orderWaiters.delete(externalId);
+            };
+
+            const done = (result: { success: boolean; price?: number; error?: string }) => {
+                if (resolved) return;
+                resolved = true;
+                cleanup();
+                resolve(result);
+            };
+
+            // Регистрируем обработчик в центральном диспетчере
+            this.orderWaiters.set(externalId, (order: any) => {
+                console.log(`[Extended WS] 🔔 Update for ${externalId}: status=${order.status}`);
+
+                if (order.status === 'FILLED') {
+                    const avgPrice = parseFloat(order.averagePrice || order.average_price || order.avgFillPrice || '0');
+                    if (avgPrice > 0) {
+                        done({ success: true, price: avgPrice });
+                    }
+                } else if (['CANCELLED', 'REJECTED', 'EXPIRED'].includes(order.status)) {
+                    done({ success: false, error: `Order ${order.status}` });
+                }
+            });
+
+            // Таймаут
+            timeoutHandle = setTimeout(() => {
+                if (!resolved) {
+                    console.log(`[Extended WS] ⏰ Timeout waiting for order ${externalId}`);
+                    done({ success: false, error: 'WebSocket timeout' });
+                }
+            }, timeoutMs);
+
+            // Если сокет еще не открыт (редкий случай для сессии, но возможен для одиночного вызова)
+            if (!existingWs) {
+                (async () => {
+                    try {
+                        await this.createAccountUpdatesSocket(userId);
+                    } catch (e: any) {
+                        done({ success: false, error: `WS connect failed: ${e.message}` });
+                    }
+                })();
+            }
+        });
     }
 }

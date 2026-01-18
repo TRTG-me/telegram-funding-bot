@@ -12,6 +12,7 @@ export interface HedgedPair {
     coin: string;
     notional: number;
     size: number;
+    price: number;
     exchanges: string;
     funding1: number;
     funding2: number;
@@ -21,6 +22,7 @@ export interface UnhedgedPosition {
     coin: string;
     notional: number;
     size: number;
+    price: number;
     side: 'LONG' | 'SHORT';
     exchange: string;
     fundingRate: number;
@@ -113,6 +115,7 @@ export class TotalPositionsService {
                         coin: longPos.coin,
                         size: parseFloat(matchSize.toFixed(3)),
                         notional: parseFloat(Math.abs(notional).toFixed(1)),
+                        price: matchSize > 0 ? Math.abs(notional) / matchSize : 0,
                         exchanges: `${longExchangeInfo.name}-${shortExchangeInfo.name}`,
                         funding1: formatFunding(longExchangeInfo.funding),
                         funding2: formatFunding(shortExchangeInfo.funding),
@@ -136,6 +139,7 @@ export class TotalPositionsService {
                     coin: p.coin,
                     size: parseFloat(p.remainingSize.toFixed(3)),
                     notional: parseFloat(Math.abs(notional).toFixed(1)),
+                    price: p.remainingSize > 0 ? Math.abs(notional) / p.remainingSize : 0,
                     side: p.side === 'L' ? 'LONG' : 'SHORT',
                     exchange: p.exchange,
                     fundingRate: parseFloat(((p.fundingRate) * 3 * 365).toFixed(0)),

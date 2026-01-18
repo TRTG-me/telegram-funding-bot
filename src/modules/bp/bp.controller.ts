@@ -36,10 +36,12 @@ export class BpController {
 
         // Кнопка Вкл/Выкл (Тоггл)
         if (currentState) {
-            await this.stopCalculation(ctx, userId);
             // Если пользователь был в процессе настройки, сообщаем о сбросе
             if (currentState.step !== 'calculating') {
+                this.userState.delete(userId);
                 await ctx.reply('🔄 Ввод сброшен. Нажмите /bp заново.');
+            } else {
+                await this.stopCalculation(ctx, userId);
             }
             return;
         }
@@ -192,12 +194,14 @@ export class BpController {
         this.userState.delete(userId);
 
         // 3. Обновляем UI
+        // Если была активная таблица - помечаем её как 'завершенную', но новое сообщение шлем вниз
         if (state && state.messageId && state.step === 'calculating') {
             try {
-                await ctx.telegram.editMessageText(userId, state.messageId, undefined, '🛑 <b>Мониторинг остановлен.</b>', { parse_mode: 'HTML' });
+                await ctx.telegram.editMessageText(userId, state.messageId, undefined, '� <b>Мониторинг BP завершен.</b>', { parse_mode: 'HTML' });
             } catch { }
-        } else {
-            await ctx.reply('🛑 Мониторинг остановлен.');
         }
+
+        // Всегда отправляем НОВОЕ сообщение вниз (после текста команды 'bp')
+        await ctx.reply('🛑 Мониторинг остановлен.');
     }
 }

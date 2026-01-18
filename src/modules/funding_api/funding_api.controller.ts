@@ -2,6 +2,7 @@ import { Context, Markup } from 'telegraf';
 import { FundingApiService } from './funding_api.service';
 import { FundingApiState } from './funding_api.types';
 import { PayBackService } from '../payback/payback.service';
+import { fundingMenuKeyboard } from '../../common/keyboards';
 
 export class FundingApiController {
     private userState = new Map<number, FundingApiState & { scanSelected?: string[] }>();
@@ -30,13 +31,7 @@ export class FundingApiController {
     }
 
     public async handleFundingMenu(ctx: Context): Promise<void> {
-        const keyboard = Markup.keyboard([
-            ['Фандинги Поз', '🏆 Лучшие монеты'],
-            ['🔍 Фандинг монеты', '🔍 Окупаемость монеты'],
-            ['⚙️ Настройки', '🔙 Назад в меню']
-        ]).resize();
-
-        await ctx.reply('Меню фандинга и анализа:', keyboard);
+        await ctx.reply('Меню фандинга и анализа:', fundingMenuKeyboard);
     }
 
     // --- ЛУЧШИЕ МОНЕТЫ (СКАНЕР) ---
@@ -309,7 +304,7 @@ export class FundingApiController {
         if (data === 'fapi_scan_page_next') {
             const s = this.userState.get(userId);
             if (s && s.scanResults && s.scanPage !== undefined) {
-                const pageSize = 10;
+                const pageSize = 15;
                 const totalPages = Math.ceil(s.scanResults.length / pageSize);
                 if (s.scanPage < totalPages - 1) {
                     s.scanPage++;
@@ -590,7 +585,7 @@ export class FundingApiController {
             return ctx.reply('⚠️ Сессия истекла или данные не найдены.');
         }
 
-        const pageSize = 10;
+        const pageSize = 15;
         const pageItems = s.scanResults.slice(s.scanPage * pageSize, (s.scanPage + 1) * pageSize);
 
         if (this.payBackService.isSessionActive(userId)) {

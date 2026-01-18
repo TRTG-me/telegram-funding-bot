@@ -1,13 +1,14 @@
 {
-  // Visit https://aka.ms/tsconfig to read more about this file
   "compilerOptions": {
     "target": "es2020",
     "module": "commonjs",
-    "moduleResolution": "node", // <-- Убедитесь, что эта строка есть
+    "moduleResolution": "node",
     "rootDir": "./src",
     "outDir": "./dist",
-    "esModuleInterop": true, // <-- И эта тоже
-    "strict": true
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
   },
   "exclude": [
     "node_modules",

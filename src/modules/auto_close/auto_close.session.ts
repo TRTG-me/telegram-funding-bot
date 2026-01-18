@@ -426,11 +426,28 @@ export class AutoCloseSession {
         const absAmount = Math.abs(amount);
         let result: number;
 
-        if (absAmount >= 10) result = Math.floor(absAmount);
-        else if (absAmount >= 1) result = Math.floor(absAmount * 10) / 10;
-        else if (absAmount >= 0.1) return Math.floor(absAmount * 100) / 100;
-        else if (absAmount >= 0.01) return Math.floor(absAmount * 1000) / 1000;
-        else result = Math.floor(absAmount * 10000) / 10000;
+        if (absAmount >= 1000) {
+            // Больше 1000: округляем до ближайшей сотни (3203 -> 3200, 3251 -> 3300)
+            result = Math.round(absAmount / 100) * 100;
+        } else if (absAmount >= 10) {
+            // От 10 до 999: округляем до ближайшего десятка (84.9 -> 80, 85.3 -> 90)
+            // Мы используем 10 как нижний порог, чтобы пример с 84.9 тоже работал
+            result = Math.round(absAmount / 10) * 10;
+        } else if (absAmount >= 1) {
+            // От 1 до 10: 1 знак после запятой (отрезаем лишнее)
+            result = Math.floor(absAmount * 10) / 10;
+        } else if (absAmount >= 0.1) {
+            // От 0.1 до 1: 2 знака
+            result = Math.floor(absAmount * 100) / 100;
+        } else if (absAmount >= 0.01) {
+            // От 0.01 до 0.1: 3 знака
+            result = Math.floor(absAmount * 1000) / 1000;
+        } else {
+            // Меньше 0.01: 4 знака
+            result = Math.floor(absAmount * 10000) / 10000;
+        }
+
+        // Убираем возможный мусор плавающей запятой (например, 0.3000000004)
         return parseFloat(result.toFixed(8));
     }
 

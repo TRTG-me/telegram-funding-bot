@@ -21,6 +21,7 @@ import { SummaryService } from './modules/summary/summary.service';
 import { TotalPositionsService } from './modules/totalPositions/totalPositions.service';
 import { TotalFundingsService } from './modules/totalFundings/totalFundings.service';
 import { BpService } from './modules/bp/bp.service';
+import { MonitorService } from './modules/monitor/monitor.service';
 import { AutoTradeService } from './modules/auto_trade/auto_trade.service';
 import { AutoCloseService } from './modules/auto_close/auto_close.service';
 import { PayBackService } from './modules/payback/payback.service';
@@ -39,6 +40,7 @@ import { LighterController } from './modules/lighter/lighter.controller';
 import { AutoCloseController } from './modules/auto_close/auto_close.controller';
 import { PayBackController } from './modules/payback/payback.controller';
 import { FundingApiController } from './modules/funding_api/funding_api.controller';
+import { MonitorController } from './modules/monitor/monitor.controller';
 import { UsersController } from './modules/users/users.controller';
 import { SettingsController } from './modules/settings/settings.controller';
 
@@ -70,16 +72,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 // ============================================================
 
-// --- Keyboards ---
-const mainMenuKeyboard = Markup.keyboard([
-    ['Trade-BOT', 'Fundings']
-]).resize();
-
-const tradeBotKeyboard = Markup.keyboard([
-    ['Плечи', 'Позиции', 'bp', 'OPEN POS'],
-    ['Ручная проверка', 'Автоматическая проверка'],
-    ['Настройки', '🔙 Назад в меню']
-]).resize();
+import { mainMenuKeyboard, tradeBotKeyboard } from './common/keyboards';
 
 const userState = new Map<number, string>();
 
@@ -141,6 +134,8 @@ async function start() {
         settingsService
     );
 
+    const monitorService = new MonitorService(bpService);
+
     const fundingApiService = new FundingApiService(
         binanceService, hyperliquidService, paradexService, lighterService, extendedService
     );
@@ -155,7 +150,12 @@ async function start() {
     // ============================================================
 
     const summaryController = new SummaryController(summaryService);
-    const totalPositionsController = new TotalPositionsController(totalPositionsService);
+    const totalPositionsController = new TotalPositionsController(
+        totalPositionsService,
+        payBackService,
+        lighterService,
+        fundingApiService
+    );
     const totalFundingsController = new TotalFundingsController(totalFundingsService);
     const bpController = new BpController(bpService);
     const autoTradeController = new AutoTradeController(autoTradeService);
@@ -164,6 +164,7 @@ async function start() {
     const autoCloseController = new AutoCloseController(autoCloseService);
     const payBackController = new PayBackController(payBackService);
     const fundingApiController = new FundingApiController(fundingApiService, payBackService);
+    const monitorController = new MonitorController(monitorService);
     const usersController = new UsersController(userService);
     const settingsController = new SettingsController(settingsService, userState);
 
@@ -199,6 +200,10 @@ async function start() {
             return settingsController.handleCallback(ctx);
         }
 
+        if (data && data.startsWith('tp_')) {
+            return totalPositionsController.handleCallbackQuery(ctx);
+        }
+
         if (data && data.startsWith('payback_')) {
             return payBackController.handleCallbackQuery(ctx);
         }
@@ -231,7 +236,7 @@ async function start() {
         ];
 
         const tradeBotCommands = [
-            'Плечи', 'Позиции', 'bp', 'OPEN POS',
+            'Плечи', 'Позиции', 'bp', 'Мониторинг', 'OPEN POS',
             'Ручная проверка', 'Автоматическая проверка', 'Настройки'
         ];
 
@@ -261,6 +266,8 @@ async function start() {
                     return totalPositionsController.displayAggregatedPositions(ctx);
                 case 'bp':
                     return bpController.handleBpCommand(ctx);
+                case 'Мониторинг':
+                    return monitorController.handleMonitorCommand(ctx);
                 case 'OPEN POS':
                     return autoTradeController.handleOpenPosCommand(ctx);
                 case 'Ручная проверка':
@@ -305,6 +312,11 @@ async function start() {
         // Payback Flow
         if (payBackController.isUserInFlow(userId)) {
             return payBackController.handleTextInput(ctx);
+        }
+
+        // Monitor Flow
+        if (monitorController.isUserInFlow(userId)) {
+            return monitorController.handleTextInput(ctx);
         }
 
         // Funding API Flow
