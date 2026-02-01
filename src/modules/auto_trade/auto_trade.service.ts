@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { AutoTradeSession } from './auto_trade.session';
 // Берем типы из специального файла (разорвали круг зависимостей)
 import { TradeSessionConfig } from './auto_trade.types';
-import { ITradingServices } from './auto_trade.helpers';
+import { ITradingServices, getUnifiedSymbol } from './auto_trade.helpers';
 
 
 // Импорт REST сервисов (они нужны для передачи в сессию)
@@ -86,6 +86,32 @@ export class AutoTradeService {
             session.stop(reason);
             this.sessions.delete(userId);
             this.logger.log(`Stopped session for user ${userId}: ${reason}`);
+        }
+    }
+
+    public async getExchangePrice(exchange: string, coin: string, userId: number): Promise<number> {
+        try {
+            const exName = exchange as any;
+            const symbol = getUnifiedSymbol(exName, coin);
+
+            switch (exchange) {
+                case 'Binance':
+                    return await this.binanceService.getPrice(symbol);
+                case 'Hyperliquid':
+                    return await this.hlService.getPrice(symbol);
+                case 'Paradex':
+                    return await this.paradexService.getPrice(symbol);
+                case 'Extended':
+                    return await this.extendedService.getPrice(symbol);
+                case 'Lighter':
+                    // Для Lighter передаем очищенный символ (например 1000BONK), т.к. getPrice сам ищет ID
+                    const rawSymbol = getUnifiedSymbol(exName, coin, true);
+                    return await this.lighterService.getPrice(rawSymbol, userId);
+                default:
+                    return 0;
+            }
+        } catch (e) {
+            return 0;
         }
     }
 }

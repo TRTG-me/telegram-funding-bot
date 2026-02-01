@@ -416,4 +416,24 @@ export class LighterService {
             return [];
         }
     }
+
+    public async getPrice(coin: string, userId: number): Promise<number> {
+        try {
+            const ctx = await this.getContext(userId);
+            const marketId = await this.getMarketId(coin, userId);
+            if (marketId === null) return 0;
+
+            const ob = await ctx.client.getOrderBook(marketId);
+            const bids = ob.bids || [];
+            const asks = ob.asks || [];
+            if (bids.length === 0 || asks.length === 0) return 0;
+
+            const bid = parseFloat(bids[0].price);
+            const ask = parseFloat(asks[0].price);
+
+            return (bid + ask) / 2;
+        } catch (e) {
+            return 0;
+        }
+    }
 }

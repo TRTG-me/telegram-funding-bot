@@ -431,7 +431,6 @@ export class BinanceService {
 
     // 8) Цены (публичные)
     public async getExchangeData(symbol: string): Promise<IExchangeData> {
-        // ... старый код (он публичный, userId не нужен)
         const baseUrl = this.isTestnet
             ? 'https://testnet.binancefuture.com'
             : 'https://fapi.binance.com';
@@ -471,7 +470,15 @@ export class BinanceService {
             return [];
         }
     }
-}
 
+    public async getPrice(symbol: string): Promise<number> {
+        try {
+            const data = await this.getExchangeData(symbol);
+            return parseFloat((data as any).lastPrice || (data as any).price || '0');
+        } catch (e) {
+            return 0;
+        }
+    }
+}
 
 export default BinanceService;

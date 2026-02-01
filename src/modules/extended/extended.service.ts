@@ -596,4 +596,17 @@ export class ExtendedService {
             }
         });
     }
+
+    public async getPrice(coin: string): Promise<number> {
+        try {
+            const market = coin.endsWith('-USD') ? coin : `${coin}-USD`;
+            const statsResponse = await axios.get<IExtendedMarketStatsResponse>(
+                `${this.apiUrl}/info/markets/${market}/stats`,
+                { timeout: CONFIG.HTTP_TIMEOUT }
+            );
+            return parseFloat(statsResponse.data?.data?.lastPrice || '0');
+        } catch (e) {
+            return 0;
+        }
+    }
 }

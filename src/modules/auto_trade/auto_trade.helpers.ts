@@ -31,6 +31,9 @@ const SPECIAL_COINS: CoinConfig = {
     'SHIB': {
         Binance: '1000SHIB', Hyperliquid: 'kSHIB', Paradex: 'kSHIB', Lighter: '1000SHIB', Extended: '1000SHIB'
     },
+    'TOSHI': {
+        Binance: 'TOSHI', Hyperliquid: 'kTOSHI', Paradex: 'kTOSHI', Lighter: '1000TOSHI', Extended: 'kTOSHI'
+    },
     'FLOKI': {
         Binance: '1000FLOKI', Hyperliquid: 'kFLOKI', Paradex: 'kFLOKI', Lighter: '1000FLOKI', Extended: null // Нет на Extended
     },
@@ -132,6 +135,17 @@ export function getUnifiedSymbol(exchange: ExchangeName, coin: string, rawSymbol
         case 'Lighter': return targetSymbol; // Возвращаем тикер (1000BONK), сервис сам найдет ID
         default: return targetSymbol;
     }
+}
+
+/**
+ * Получает коэффициент цены для символа.
+ * Если символ начинается на 1000 или k/K, возвращает 1000, иначе 1.
+ */
+export function getPriceMultiplier(symbol: string): number {
+    const s = symbol.toUpperCase();
+    if (s.startsWith('1000')) return 1000;
+    if (s.startsWith('K') && s.length > 3) return 1000;
+    return 1;
 }
 
 // --- ЛОГИКА ТОРГОВЛИ ---
