@@ -5,7 +5,7 @@ import { telegramQueue } from '../../common/telegram.queue'; // C4 FIX
 import { tradeBotKeyboard } from '../../common/keyboards';
 
 interface AutoTradeState {
-    step: 'coin' | 'long_ex' | 'short_ex' | 'total_qty' | 'step_qty' | 'bp' | 'running';
+    step: 'coin' | 'long_ex' | 'short_ex' | 'total_qty' | 'step_qty' | 'step_warning' | 'bp' | 'running';
     coin?: string;
     longEx?: ExchangeName;
     shortEx?: ExchangeName;
@@ -19,6 +19,8 @@ interface AutoTradeState {
 
     messageQueue: string[];
     isProcessingQueue: boolean;
+    coinPrice?: number;
+    coinPriceUsd?: number;
 }
 
 const EXCHANGES: ExchangeName[] = ['Binance', 'Hyperliquid', 'Paradex', 'Extended', 'Lighter'];
@@ -29,6 +31,7 @@ export class AutoTradeController {
     private userStateTimestamps = new Map<number, number>();
     private processingUsers = new Set<number>(); // C7 FIX
     private cleanupInterval: NodeJS.Timeout;
+    private readonly MAX_STEP_USD = 350; // Лимит на один шаг в долларах
 
     constructor(private readonly autoTradeService: AutoTradeService) {
         // Запускаем очистку каждую минуту (C3 FIX)
@@ -88,26 +91,21 @@ export class AutoTradeController {
 
             // FIX: Если статус 'running', значит сессия активна (даже если isRunning врет/задержка).
             // Останавливаем принудительно.
-            if ((state && state.step === 'running') || this.autoTradeService.isRunning(userId)) {
-                this.autoTradeService.stopSession(userId, 'Остановлено кнопкой OPEN POS');
+            // Код оптимизирован: все проверки состояния объединены ниже
 
-                // Изменено по просьбе: сообщение пишется в конце, а не редактирует дашборд
-                await ctx.reply('🛑 <b>Набор остановлен вручную.</b>', { parse_mode: 'HTML', ...tradeBotKeyboard });
+            if (state || this.autoTradeService.isRunning(userId)) {
+                // Если сессия запущена - останавливаем её
+                if (this.autoTradeService.isRunning(userId)) {
+                    this.autoTradeService.stopSession(userId, 'Остановлено кнопкой OPEN POS');
+                    await ctx.reply('🛑 <b>Набор остановлен вручную.</b>', { parse_mode: 'HTML', ...tradeBotKeyboard });
+                } else if (state && state.step !== 'running') {
+                    // Если просто в процессе ввода - отменяем ввод
+                    await ctx.reply('🚫 <b>Ввод данных отменен.</b>', { parse_mode: 'HTML', ...tradeBotKeyboard });
+                }
 
-                // Сбрасываем ID сообщения, чтобы onFinished (если вызовется) не пытался редактировать его снова
-                // или позволим onFinished пометить его как "Сессия завершена" корректно.
-                // Лучше оставить как есть, onFinished добьет статус дашборда до "Завершено".
                 this.userStates.delete(userId);
-                this.userStateTimestamps.delete(userId); // C3 FIX
-                this.processingUsers.delete(userId); // 🔓 НЕМЕДЛЕННАЯ РАЗБЛОКИРОВКА
-                return;
-            }
-
-            if (this.isUserInFlow(userId)) {
-                this.userStates.delete(userId);
-                this.userStateTimestamps.delete(userId); // C3 FIX
-                await ctx.reply('🚫 <b>Ввод данных отменен.</b>', { parse_mode: 'HTML', ...tradeBotKeyboard });
-                this.processingUsers.delete(userId); // 🔓 НЕМЕДЛЕННАЯ РАЗБЛОКИРОВКА
+                this.userStateTimestamps.delete(userId);
+                this.processingUsers.delete(userId);
                 return;
             }
 
@@ -117,7 +115,7 @@ export class AutoTradeController {
                 isProcessingQueue: false
             });
             this.userStateTimestamps.set(userId, Date.now()); // C3 FIX
-            await ctx.reply('\n1️⃣ Введите тикер монеты (например, ETH):', { parse_mode: 'HTML' });
+            await ctx.reply('\nВведите тикер монеты (например, ETH):', { parse_mode: 'HTML' });
 
         } finally {
             // 🔓 РАЗБЛОКИРОВКА через 2 секунды (защита от спама)
@@ -140,22 +138,39 @@ export class AutoTradeController {
                     if (!/^[a-zA-Z0-9]{2,10}$/.test(text)) return ctx.reply('❌ Некорректный тикер.');
                     state.coin = text.toUpperCase();
                     state.step = 'long_ex';
-                    await ctx.reply(`Монета: <b>${state.coin}</b>.\n2️⃣ Выберите биржу для <b>LONG</b>:`, { parse_mode: 'HTML', ...this.getExchangeKeyboard('at_long') });
+                    await ctx.reply(`Монета: <b>${state.coin}</b>.\nВыберите биржу для <b>LONG</b>:`, { parse_mode: 'HTML', ...this.getExchangeKeyboard('at_long') });
                     break;
                 case 'total_qty':
                     const tQty = parseFloat(text);
                     if (isNaN(tQty) || tQty <= 0) return ctx.reply('❌ Введите число > 0');
                     state.totalQty = tQty;
                     state.step = 'step_qty';
-                    await ctx.reply(`Всего: ${tQty}.\n5️⃣ Введите размер <b>одного шага</b>:`, { parse_mode: 'HTML' });
+                    await ctx.reply(`Всего: ${tQty}.\nВведите размер <b>одного шага</b>:`, { parse_mode: 'HTML' });
                     break;
                 case 'step_qty':
                     const sQty = parseFloat(text);
                     if (isNaN(sQty) || sQty <= 0) return ctx.reply('❌ Введите число > 0');
                     if (sQty > state.totalQty!) return ctx.reply('❌ Шаг больше общего!');
-                    state.stepQty = sQty;
-                    state.step = 'bp';
-                    await ctx.reply(`Шаг: ${sQty}.\n6️⃣ Введите желаемый <b>BP</b>:`, { parse_mode: 'HTML' });
+
+                    // Проверка на лимит шага
+                    const stepUsd = sQty * (state.coinPrice || 0);
+                    state.stepQty = sQty; // Сохраняем в любом случае для расчета
+
+                    if (stepUsd > this.MAX_STEP_USD) {
+                        state.step = 'step_warning';
+                        await ctx.reply(`⚠️ <b>ВНИМАНИЕ!</b> Размер шага (<b>$${stepUsd.toFixed(2)}</b>) превышает лимит в <b>$${this.MAX_STEP_USD}</b>.\n\nХотите продолжить с данным шагом?`, {
+                            parse_mode: 'HTML',
+                            ...Markup.inlineKeyboard([
+                                [
+                                    Markup.button.callback('Да', 'at_step_warn_yes'),
+                                    Markup.button.callback('Нет', 'at_step_warn_no')
+                                ]
+                            ])
+                        });
+                    } else {
+                        state.step = 'bp';
+                        await ctx.reply(`Шаг: ${sQty}.\nВведите желаемый <b>BP</b>:`, { parse_mode: 'HTML' });
+                    }
                     break;
                 case 'bp':
                     const bp = parseFloat(text);
@@ -181,12 +196,32 @@ export class AutoTradeController {
         if (data.startsWith('at_long_')) {
             state.longEx = data.replace('at_long_', '') as ExchangeName;
             state.step = 'short_ex';
-            await ctx.editMessageText(`Long: <b>${state.longEx}</b>.\n3️⃣ Выберите биржу для <b>SHORT</b>:`, { parse_mode: 'HTML', ...this.getExchangeKeyboard('at_short', state.longEx) });
+            await ctx.editMessageText(`Long: <b>${state.longEx}</b>.\nВыберите биржу для <b>SHORT</b>:`, { parse_mode: 'HTML', ...this.getExchangeKeyboard('at_short', state.longEx) });
         } else if (data.startsWith('at_short_')) {
             state.shortEx = data.replace('at_short_', '') as ExchangeName;
             state.step = 'total_qty';
+
             await ctx.editMessageText(`Выбрано: Long <b>${state.longEx}</b> | Short <b>${state.shortEx}</b>`, { parse_mode: 'HTML' });
-            await ctx.reply(`4️⃣ Введите <b>ОБЩЕЕ</b> количество монет:`, { parse_mode: 'HTML' });
+
+            // Fetch price from Long exchange
+            const price = await this.autoTradeService.getExchangePrice(state.longEx!, state.coin!, userId);
+            if (price > 0) {
+                state.coinPrice = price;
+                const qtyFor300 = (300 / price).toFixed(0);
+                const priceStr = price < 0.1 ? price.toFixed(8) : price.toFixed(4);
+                await ctx.reply(`Цена <b>${state.coin}</b>: <b>${priceStr}$</b>\n` +
+                    `На 300$: <b>${qtyFor300} ${state.coin}</b>`, { parse_mode: 'HTML' });
+            } else {
+                await ctx.reply(`⚠️ Цена <b>${state.coin}</b> на <b>${state.longEx}</b> не найдена.`, { parse_mode: 'HTML' });
+            }
+
+            await ctx.reply(`Введите <b>ОБЩЕЕ</b> количество монет:`, { parse_mode: 'HTML' });
+        } else if (data === 'at_step_warn_yes') {
+            state.step = 'bp';
+            await ctx.editMessageText(`✅ Шаг подтвержден: <b>${state.stepQty}</b>\nВведите желаемый <b>BP</b>:`, { parse_mode: 'HTML' });
+        } else if (data === 'at_step_warn_no') {
+            state.step = 'step_qty';
+            await ctx.editMessageText('🔄 Введите размер <b>одного шага</b> заново:', { parse_mode: 'HTML' });
         }
     }
 
@@ -261,6 +296,7 @@ export class AutoTradeController {
         else statusText = '🔵 Завершено';
 
         return `📊 <b>LIVE STATUS</b>\n` +
+            `Монета: <b>${state.coin}</b> (Price: <b>${state.coinPrice?.toFixed(4) ?? '...'}</b>)\n` +
             `Состояние: ${statusText}\n\n` +
             `Target BP: <b>${state.targetBp}</b>\n` +
             `Current BP: <b>${data.currentBp.toFixed(2)}</b>\n` +

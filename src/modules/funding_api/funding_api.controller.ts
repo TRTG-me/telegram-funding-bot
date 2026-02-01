@@ -413,7 +413,10 @@ export class FundingApiController {
 
     private async generateReport(ctx: Context, coin: string, selected: string[] = []): Promise<void> {
         try {
-            const data = await this.fundingApiService.getCoinAnalysis(coin, selected);
+            // Если выбрана 1 биржа - запрашиваем полный анализ (все биржи), чтобы построить пересечения
+            const apiSelected = selected.length === 1 ? undefined : selected;
+            const data = await this.fundingApiService.getCoinAnalysis(coin, apiSelected);
+
             const availableForCoin = data.availableExchanges;
             let pairs: [string, string][] = [];
 
@@ -431,11 +434,16 @@ export class FundingApiController {
 
             if (pairs.length === 0) {
                 await ctx.reply(`📭 Монета ${coin} представлена только на одной бирже или недостаточно данных.`);
+                return;
             }
 
-            // Fetch live APRs
+            // Участие бирж для сбора Live APR и графика
+            const participatingExchanges = new Set(pairs.flat());
+            if (selected.length === 1) participatingExchanges.add(selected[0]);
+
+            // Fetch live APRs для всех участвующих бирж
             const liveAPRs = new Map<string, number>();
-            await Promise.all(selected.map(async (ex) => {
+            await Promise.all(Array.from(participatingExchanges).map(async (ex) => {
                 const apr = await this.fundingApiService.getLiveFundingAPR(ex, coin);
                 liveAPRs.set(ex, apr);
             }));
@@ -449,8 +457,6 @@ export class FundingApiController {
             }
 
             if (data.histories && data.histories.length > 0) {
-                const participatingExchanges = new Set(pairs.flat());
-                if (selected.length === 1) participatingExchanges.add(selected[0]);
                 const filteredHistories = data.histories.filter(h => participatingExchanges.has(h.exchange));
                 if (filteredHistories.length > 0) {
                     const chartBuffer = await this.fundingApiService.generateChart(coin, filteredHistories);

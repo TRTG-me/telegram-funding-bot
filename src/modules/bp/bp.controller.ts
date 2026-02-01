@@ -138,9 +138,12 @@ export class BpController {
                 text = `⏳ <b>${current.coin}</b>\nОжидание данных...`;
             } else {
                 const dateStr = new Date().toLocaleTimeString('ru-RU');
+                const fmtL = parseFloat(data.longPrice.toPrecision(6));
+                const fmtS = parseFloat(data.shortPrice.toPrecision(6));
+
                 text = `📊 <b>${current.coin} BP MONITOR</b> [${dateStr}]\n\n` +
-                    `📈 L (${current.longExchange}): <b>${data.longPrice}</b>\n` +
-                    `📉 S (${current.shortExchange}): <b>${data.shortPrice}</b>\n` +
+                    `📈 L (${current.longExchange}): <b>${fmtL}</b>\n` +
+                    `📉 S (${current.shortExchange}): <b>${fmtS}</b>\n` +
                     `---------------------------\n` +
                     `💰 <b>BP: ${data.bpValue.toFixed(2)}</b>`;
             }

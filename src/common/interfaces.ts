@@ -116,6 +116,9 @@ export interface IExtendedPositionsResponse {
 
 export interface IExtendedMarketStatsData {
     fundingRate: string;
+    lastPrice?: string;
+    bidPrice?: string;
+    askPrice?: string;
 }
 
 export interface IExtendedMarketStatsResponse {

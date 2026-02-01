@@ -73,17 +73,23 @@ export class BpSession {
 
             if (this.isStopping) return;
 
+            // Определяем множители цены для каждой биржи (нормализация 1000TOSHI vs TOSHI)
+            const longTicker = Helpers.getUnifiedSymbol(longExchange, coin, true);
+            const shortTicker = Helpers.getUnifiedSymbol(shortExchange, coin, true);
+            const longMult = Helpers.getPriceMultiplier(longTicker);
+            const shortMult = Helpers.getPriceMultiplier(shortTicker);
+
             this.activeLongService = this.createTickerInstance(longExchange);
             this.activeShortService = this.createTickerInstance(shortExchange);
 
-            this.logger.log(`[User ${this.userId}] Starting BP: ${longExchange} vs ${shortExchange}`);
+            this.logger.log(`[User ${this.userId}] Starting BP: ${longExchange} vs ${shortExchange} (Mults: ${longMult}/${shortMult})`);
 
-            const startSafe = async (service: TickerInstance, symbol: string, isLong: boolean) => {
+            const startSafe = async (service: TickerInstance, symbol: string, isLong: boolean, multiplier: number) => {
                 try {
                     await service.start(symbol, (bid: string, ask: string) => {
                         this.lastPriceUpdate = Date.now(); // H1 Fix
-                        if (isLong) this.latestLongAsk = parseFloat(ask);
-                        else this.latestShortBid = parseFloat(bid);
+                        if (isLong) this.latestLongAsk = parseFloat(ask) / multiplier;
+                        else this.latestShortBid = parseFloat(bid) / multiplier;
                     });
                 } catch (e) {
                     throw e;
@@ -93,8 +99,8 @@ export class BpSession {
             };
 
             await Promise.all([
-                startSafe(this.activeLongService, longSymbol, true),
-                startSafe(this.activeShortService, shortSymbol, false)
+                startSafe(this.activeLongService, longSymbol, true, longMult),
+                startSafe(this.activeShortService, shortSymbol, false, shortMult)
             ]);
 
             if (this.isStopping) {

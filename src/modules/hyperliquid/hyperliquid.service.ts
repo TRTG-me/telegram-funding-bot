@@ -428,4 +428,14 @@ export class HyperliquidService {
             return [];
         }
     }
+
+    public async getPrice(coin: string): Promise<number> {
+        try {
+            const body = { type: 'allMids' };
+            const response = await axios.post(this.API_URL, body, { timeout: HTTP_TIMEOUT });
+            return parseFloat(response.data[coin] || '0');
+        } catch (e) {
+            return 0;
+        }
+    }
 }

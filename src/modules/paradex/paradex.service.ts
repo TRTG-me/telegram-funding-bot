@@ -531,4 +531,21 @@ export class ParadexService {
             return [];
         }
     }
+
+    public async getPrice(coin: string): Promise<number> {
+        try {
+            const market = coin.endsWith('-USD-PERP') ? coin : `${coin}-USD-PERP`;
+            const summaryRes = await axios.get(`${this.apiUrl}/markets/summary?market=${market}`, {
+                headers: BROWSER_HEADERS,
+                timeout: HTTP_TIMEOUT
+            });
+            const res = summaryRes.data.results[0];
+            if (!res) return 0;
+
+            const lastPrice = res.last_traded_price || res.mark_price || res.underlying_price;
+            return parseFloat(lastPrice || '0');
+        } catch (e) {
+            return 0;
+        }
+    }
 }
